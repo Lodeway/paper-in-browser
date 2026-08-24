@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+# The jars are ~110 MB of runtime payload, not content.
+Disallow: /jars/

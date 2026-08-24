@@ -26,7 +26,9 @@ if (!result.success) {
   process.exit(1);
 }
 
-await cp(path.join(root, "src", "favicon.svg"), path.join(dist, "favicon.svg"));
+for (const name of ["favicon.svg", "og.png", "robots.txt"]) {
+  await cp(path.join(root, "src", name), path.join(dist, name));
+}
 
 // Relative targets, resolved from inside dist/: dist/jars -> ../public/jars, etc.
 // world.zip is optional (only present when a seed world has been baked).
