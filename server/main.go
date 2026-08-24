@@ -56,6 +56,8 @@ func staticHandler(dir string) http.Handler {
 		p := path.Clean("/" + r.URL.Path)
 		if p == "/" {
 			w.Header().Set("Cache-Control", "no-cache")
+			// lets Chrome's JS Self-Profiling API sample the page, so the running JVM can be profiled
+			w.Header().Set("Document-Policy", "js-profiling")
 			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 			return
 		}

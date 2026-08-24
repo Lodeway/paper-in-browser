@@ -181,6 +181,24 @@ stage_dist() {
         esac
     done
 
+    # Browser-only post-pass: rewrite calls through jvmdg's VarHandle emulation stub (~2.7us/access
+    # under CheerpJ) into direct field access (~30ns). Sound only on CheerpJ's single cooperative
+    # thread, so it runs on the staged copies: work/dg/out stays pristine for anything that boots on
+    # a real JDK 8 (make-world.sh, verify), where real worker threads need the real atomics.
+    log "post-pass: VarHandleFixup (browser-only: direct field access instead of the VarHandle stub)"
+    mkdir -p "$DG/fixup"
+    "$J8/bin/javac" -nowarn -cp "$WORK/jvmdowngrader.jar" -d "$DG/fixup" "$ROOT/tools/fixup/VarHandleFixup.java"
+    "$J8/bin/java" -Xmx3G ${VH_OPTS:-} -cp "$DG/fixup:$WORK/jvmdowngrader.jar:$DG/api8.jar" VarHandleFixup \
+        $(ls "$STAGE"/*.jar | grep -vE '/(api8|jvmdowngrader)\.jar$')
+
+    # the JDK 8 classpath (pristine jars, same order as the page's classpath.txt minus the launcher)
+    {
+        echo "$DG/api8.jar"
+        echo "$DG/out/paper-$PAPER_VERSION.jar"
+        ls "$DG/out"/*.jar | grep -v "/paper-$PAPER_VERSION\.jar$" | grep -vE 'jline-terminal-ffm|netty-transport-native-epoll|netty-transport-native-kqueue'
+        echo "$DG/jvmdowngrader-patched.jar"
+    } > "$DG/classpath-jdk8.txt"
+
     log "compiling the launcher"
     local LCP; LCP="$(ls "$STAGE"/*.jar | tr '\n' ':')"
     rm -rf "$DG/launcher" && mkdir -p "$DG/launcher"
@@ -213,7 +231,10 @@ verify() {
     log "boot check on JDK 8 (world generates, listener binds; ctrl-c or 'stop' to end)"
     local RUN="$WORK/bootcheck"; mkdir -p "$RUN"
     echo "eula=true" > "$RUN/eula.txt"
-    local CP; CP="$(sed "s|^jars/|$ROOT/web/public/jars/|" "$ROOT/web/public/classpath.txt" | grep -v launcher.jar | tr '\n' ':')"
+    # boot the pristine jars: the shipped ones have the browser-only VarHandleFixup applied, which is
+    # not thread-safe on a real JVM (see stage_dist)
+    [ -f "$WORK/dg/classpath-jdk8.txt" ] || { echo "run scripts/build-jar.sh dist first (needs work/dg/classpath-jdk8.txt)" >&2; exit 1; }
+    local CP; CP="$(tr '\n' ':' < "$WORK/dg/classpath-jdk8.txt")"
     (cd "$RUN" && "$J8/bin/java" -Xmx3G -cp "$CP" org.bukkit.craftbukkit.Main nogui)
 }
 

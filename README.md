@@ -31,7 +31,8 @@ This is the same model Paper itself uses against Mojang's code: the repo distrib
 patches/      the Java 8 port, as diffs against Paper @ 0bdc80db
 sources/      files that are entirely ours and compile into the server (local transport, file helpers)
 launcher/     BrowserMain.java: what CheerpJ actually runs (console bridge, tunnel bridge, ops channel)
-tools/        JVMDowngrader fixes: a patched provider, four corrected API stubs, two ASM post-passes,
+tools/        JVMDowngrader fixes: a patched provider, four corrected API stubs, three ASM post-passes
+              (incl. a browser-only pass that turns VarHandle-stub calls into direct field access),
               and an analyzer that scans jars for members missing on Java 8
 scripts/      build-jar.sh (the pipeline) and make-world.sh (the shipped spawn region)
 server/       the Go server: static site, Mojang API proxies, identity minting, the tunnel
