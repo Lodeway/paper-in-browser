@@ -133,10 +133,14 @@ stage_dg() {
     patch_jvmdg
 
     log "downgrading every jar to class file v52 ($JOBS-way parallel; takes a few minutes)"
+    # -Djvmdg.javaApi points every process at the extracted patched java-api.jar directly. Without it
+    # each process validates a shared .jvmdg/ cache against the api jar embedded in the tool jar and
+    # rewrites it on mismatch; the patched tool jar never matches a stale cache, so parallel runs
+    # race on that rewrite and fail with truncated or missing cache files.
     export DG_DIR="$DG" JVMDG="$DG/jvmdowngrader-patched.jar"
     ls "$DG/in"/*.jar | xargs -P "$JOBS" -n 1 sh -c '
         n=$(basename "$1")
-        java -Xmx2G -jar "$JVMDG" -c 52 -l WARN downgrade -cp "$(cat "$DG_DIR/cp.txt")" -t "$1" "$DG_DIR/out/$n" > "$DG_DIR/logs/$n.log" 2>&1 || echo "FAILED $n"
+        java -Xmx2G "-Djvmdg.javaApi=$DG_DIR/nested/META-INF/lib/java-api.jar" -jar "$JVMDG" -c 52 -l WARN downgrade -cp "$(cat "$DG_DIR/cp.txt")" -t "$1" "$DG_DIR/out/$n" > "$DG_DIR/logs/$n.log" 2>&1 || echo "FAILED $n"
     ' downgrade | tee "$DG/failed.txt"
     if grep -q FAILED "$DG/failed.txt"; then echo "some jars failed to downgrade; see work/dg/logs/" >&2; exit 1; fi
 
@@ -147,6 +151,17 @@ stage_dg() {
 
     log "post-pass: CheerpjFixup (netty-common MethodHandle uses CheerpJ cannot link)"
     "$J8/bin/java" -cp "$DG/fixup:$WORK/jvmdowngrader.jar" CheerpjFixup "$DG/out"/netty-common-*.jar
+
+    # configurate detects records through name-based reflection (Class.isRecord etc.), which the
+    # downgrader cannot rewrite; on Java 8 the lookups fail and record-backed config sections cannot
+    # be re-instantiated on a reboot. Swap in a RecordFieldDiscoverer bound to the jvmdg record stubs.
+    log "post-pass: configurate record support (tools/configurate/RecordFieldDiscoverer.java)"
+    local CONF GEANTY
+    CONF="$(ls "$DG/out"/configurate-core-*.jar)"
+    GEANTY="$(ls "$DG/out"/geantyref-*.jar)"
+    rm -rf "$DG/configurate" && mkdir -p "$DG/configurate"
+    "$J8/bin/javac" -nowarn -cp "$DG/api8.jar:$CONF:$GEANTY" -d "$DG/configurate" "$ROOT/tools/configurate/RecordFieldDiscoverer.java"
+    (cd "$DG/configurate" && "$J8/bin/jar" uf "$CONF" org)
 
     touch "$DG/.done"
 }
