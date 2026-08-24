@@ -9,28 +9,33 @@ import java.util.*;
 import java.util.zip.*;
 
 // Post-pass over the downgraded jars: replace calls through JVMDowngrader's VarHandle emulation stub
-// (J_L_I_VarHandle) with direct field/array access. The stub costs ~2.7us per access under CheerpJ
-// (dispatch + owner checks + emulated Unsafe) vs ~30ns for a plain field access, and the chunk
-// system's hot structures (MultiThreadedQueue, the concurrent hash tables, NewChunkHolder, ...) sit
-// on it for every operation.
+// (J_L_I_VarHandle) with the field or array access itself, inlined at the callsite. The stub costs
+// ~2.7us per access under CheerpJ (dispatch + owner checks + emulated Unsafe) vs ~30ns for a plain
+// field access, and the chunk system's hot structures (MultiThreadedQueue, the concurrent hash
+// tables, NewChunkHolder, ...) sit on it for every operation.
 //
-// Sound only because CheerpJ runs every Java thread cooperatively on one JS thread: threads can only
-// switch at yield points (blocking calls, monitors, sleeps), never inside the straight-line helper
-// methods generated here, so plain reads/writes — and non-atomic compare-and-set sequences — observe
-// and preserve the same values the atomic originals would.
+// The access is inlined rather than delegated to generated accessor methods: an earlier version
+// generated `static labs$vh...` helpers, which were bytecode-correct (they passed HotSpot's verifier
+// and ran fine on a real JDK 8) but were miscompiled by CheerpJ's JIT once hot — reads through them
+// started returning null at the JIT tier-up threshold. Inlined checkcast+getfield/putfield is the
+// exact shape javac emits and is what CheerpJ is best tested against.
+//
+// Sound only because CheerpJ runs every Java thread cooperatively on one JS thread: threads switch
+// only at yield points (blocking calls, monitors, sleeps), never inside the straight-line inlined
+// sequences, so plain reads/writes — and non-atomic compare-and-set sequences — observe and preserve
+// the same values the atomic originals would.
 //
 // Mechanics, per jar set (all jars are processed in one invocation so cross-jar targets resolve):
 //  1. Classes whose constant pool mentions the stub are parsed; their <clinit> is pattern-matched for
 //     handle creation (ConcurrentUtil.getVarHandle/getStaticVarHandle/getArrayHandle and the
 //     MethodHandles stub equivalents) with constant arguments, giving handleField -> (kind, owner,
 //     field, type). The target field is verified to exist; its real descriptor wins.
-//  2. Every invokevirtual on the stub whose receiver provably is a mapped handle (a getstatic of the
-//     handle field, or jvmdg's nest accessor for it — tracked with a dataflow analysis) is redirected
-//     to an invokestatic helper with the same stack shape (stub receiver becomes an ignored first
-//     argument, so existing stack frames stay valid and untouched methods are copied byte-identical).
-//  3. Helpers are generated once per (handle, op) into the class that owns the target field (private
-//     access works; nestmates share a package, so cross-class calls stay legal). Unprovable or
-//     unsupported callsites are left on the stub.
+//  2. Every invokevirtual on the stub whose receiver provably is `getstatic <mapped handle>` — with
+//     the getstatic in the same straight-line region as the call — is planned for inlining; the
+//     getstatic is deleted and the call becomes the direct access (with a branch for compare-and-set,
+//     scratch locals for the read-modify-write ops). Everything else stays on the stub.
+//  3. Only classes with rewrites (or in the same package, for private access) are re-serialized;
+//     frames are recomputed against the full jar set. Untouched classes are copied byte-identical.
 public class VarHandleFixup {
     static final String STUB = "xyz/wagyourtail/jvmdg/j9/stub/java_base/J_L_I_VarHandle";
     static final String STUB_DESC = "L" + STUB + ";";
@@ -44,7 +49,6 @@ public class VarHandleFixup {
         String owner;      // field owner (instance/static kinds)
         String field;
         Type fieldType;    // field type, or array class type for KIND_ARRAY
-        int id;            // for unique helper names
     }
 
     // handle map key: declaringClass + "." + handleFieldName
@@ -53,10 +57,23 @@ public class VarHandleFixup {
     static final Map<String, String> classJar = new HashMap<>();        // internal name -> jar path
     static final Map<String, ClassNode> parsed = new HashMap<>();       // internal name -> node
     static final Set<String> changed = new HashSet<>();
-    static final Map<String, MethodNode> helperCache = new HashMap<>(); // ownerClass + "." + helperName
-    static final Set<Handle> used = new HashSet<>();                    // handles with >=1 rewritten callsite
+    static final Set<Handle> used = new HashSet<>();                    // handles with >=1 inlined callsite
     static ClassLoader loader;
-    static int nextId = 0, rewritten = 0, skipped = 0;
+    static int rewritten = 0, skipped = 0;
+
+    // Park/unpark handshakes stay on the stub: their spin-until-CAS loops sit across LockSupport.park
+    // and rely on the stub's native call being a yield point in CheerpJ's cooperative scheduler — an
+    // inlined sequence never yields, and the boot deadlocks (empirically: QueueExecutorRunnable hangs
+    // Bootstrap). These run once per work batch, so the stub cost is irrelevant there.
+    static final String[] PARK_HANDSHAKES = { "QueueExecutorRunnable", "$TickThreadRunner" };
+
+    // debugging aids: -Dvh.ops=get,set restricts which op families are rewritten (default: all);
+    // -Dvh.exclude=A,B skips rewriting inside classes whose internal name contains A or B;
+    // -Dvh.novolatile skips the volatile marking; -Dvh.nulltransform re-serializes without rewriting
+    static final Set<String> OPS = System.getProperty("vh.ops") == null ? null
+        : new HashSet<>(Arrays.asList(System.getProperty("vh.ops").split(",")));
+    static final String[] EXCLUDE = System.getProperty("vh.exclude") == null ? new String[0]
+        : System.getProperty("vh.exclude").split(",");
 
     public static void main(String[] args) throws Exception {
         List<URL> urls = new ArrayList<>();
@@ -87,18 +104,25 @@ public class VarHandleFixup {
         }
         System.out.println("[vh] mapped " + handles.size() + " VarHandle statics");
 
-        // pass 2: rewrite callsites in every candidate class
+        if (System.getProperty("vh.nulltransform") != null) {
+            changed.addAll(parsed.keySet());
+            writeJars(args);
+            return;
+        }
+
+        // pass 2: inline callsites in every candidate class
         for (String name : new ArrayList<>(parsed.keySet())) {
             ClassNode cn = parsed.get(name);
-            for (MethodNode mn : new ArrayList<>(cn.methods)) rewriteMethod(cn, mn); // helpers append to cn.methods
+            for (MethodNode mn : cn.methods) rewriteMethod(cn, mn);
         }
-        System.out.println("[vh] rewrote " + rewritten + " callsites, left " + skipped + " on the stub");
+        System.out.println("[vh] inlined " + rewritten + " callsites, left " + skipped + " on the stub");
 
         // Plain reads can be cached by CheerpJ's JIT across a cooperative spin loop, so a thread
         // polling a flag another thread sets would never see the write. Volatile costs nothing
-        // measurable under CheerpJ and forces the re-read, so every rewritten target field gets it.
+        // measurable under CheerpJ and forces the re-read, so every inlined target field gets it.
         int marked = 0;
-        for (Handle h : used) {
+        boolean noVolatile = System.getProperty("vh.novolatile") != null;
+        for (Handle h : noVolatile ? Collections.<Handle>emptySet() : used) {
             if (h.kind == KIND_ARRAY) continue;
             ClassNode owner = node(h.owner);
             FieldNode f = owner == null ? null : field(owner, h.field);
@@ -109,7 +133,11 @@ public class VarHandleFixup {
         }
         System.out.println("[vh] marked " + marked + " target fields volatile");
 
-        // pass 3: write back every jar that has changed classes
+        writeJars(args);
+    }
+
+    // write back every jar that has changed classes
+    static void writeJars(String[] args) throws IOException {
         for (String jar : args) {
             boolean dirty = false;
             for (String c : changed) if (jar.equals(classJar.get(c))) { dirty = true; break; }
@@ -162,8 +190,7 @@ public class VarHandleFixup {
             if (put.getOpcode() != Opcodes.PUTSTATIC || !put.desc.equals(STUB_DESC)) continue;
             AbstractInsnNode prev = real(insn.getPrevious());
             if (!(prev instanceof MethodInsnNode)) continue;
-            MethodInsnNode fac = (MethodInsnNode) prev;
-            Handle h = matchFactory(fac);
+            Handle h = matchFactory((MethodInsnNode) prev);
             String key = put.owner + "." + put.name;
             if (h == null) { handles.remove(key); continue; } // unknown factory: never trust this field
             if (h.kind != KIND_ARRAY) {
@@ -173,7 +200,6 @@ public class VarHandleFixup {
                 if (target == null) continue;
                 h.fieldType = Type.getType(target.desc);
             }
-            h.id = nextId++;
             if (handles.containsKey(key)) handles.remove(key); // assigned twice: ambiguous, drop
             else handles.put(key, h);
         }
@@ -244,13 +270,14 @@ public class VarHandleFixup {
         return null;
     }
 
-    // ---- callsite rewriting -----------------------------------------------------------------------------
+    // ---- callsite inlining ------------------------------------------------------------------------------
 
-    // Park/unpark handshakes stay on the stub: their spin-until-CAS loops sit across LockSupport.park
-    // and rely on the stub's native call being a yield point in CheerpJ's cooperative scheduler — an
-    // inline helper never yields, and the boot deadlocks (empirically: QueueExecutorRunnable hangs
-    // Bootstrap). These run once per work batch, so the stub cost is irrelevant there.
-    static final String[] PARK_HANDSHAKES = { "QueueExecutorRunnable", "$TickThreadRunner" };
+    static final class Plan {
+        FieldInsnNode getstatic;
+        MethodInsnNode call;
+        Handle handle;
+        String base;
+    }
 
     static void rewriteMethod(ClassNode cn, MethodNode mn) {
         for (String e : PARK_HANDSHAKES) if (cn.name.contains(e)) return;
@@ -270,84 +297,91 @@ public class VarHandleFixup {
             return;
         }
 
+        // plan first (frame indices are only valid on the unmodified method), then mutate
+        List<Plan> plans = new ArrayList<>();
         AbstractInsnNode[] insns = mn.instructions.toArray();
         for (int i = 0; i < insns.length; i++) {
             if (!(insns[i] instanceof MethodInsnNode) || insns[i].getOpcode() != Opcodes.INVOKEVIRTUAL) continue;
             MethodInsnNode call = (MethodInsnNode) insns[i];
             if (!call.owner.equals(STUB)) continue;
-            Frame<SourceValue> frame = frames[i];
-            if (frame == null) continue;
-            Type[] argTypes = Type.getArgumentTypes(call.desc);
-            int recvSlot = frame.getStackSize() - argTypes.length - 1;
-            if (recvSlot < 0) { skipped++; continue; }
-            Handle h = resolveReceiver(frame.getStack(recvSlot));
-            if (h == null) { skipped++; continue; }
-            String helperOwner = h.kind == KIND_ARRAY ? cn.name : h.owner;
-            ClassNode helperClass = node(helperOwner);
-            if (helperClass == null || !samePackage(cn.name, helperOwner)) { skipped++; continue; }
-            MethodNode helper = helper(helperClass, h, call);
-            if (helper == null) { skipped++; continue; }
-            call.setOpcode(Opcodes.INVOKESTATIC);
-            call.owner = helperOwner;
-            call.name = helper.name;
-            call.desc = "(" + STUB_DESC + call.desc.substring(1);
-            call.itf = false;
-            used.add(h);
+            Plan p = plan(cn, frames[i], call);
+            if (p == null) skipped++;
+            else plans.add(p);
+        }
+        for (Plan p : plans) {
+            apply(mn, p);
+            used.add(p.handle);
             rewritten++;
             changed.add(cn.name);
-        }
-    }
-
-    static Handle resolveReceiver(SourceValue v) {
-        if (v == null || v.insns.size() != 1) return null;
-        AbstractInsnNode src = v.insns.iterator().next();
-        if (src instanceof FieldInsnNode && src.getOpcode() == Opcodes.GETSTATIC) {
-            FieldInsnNode f = (FieldInsnNode) src;
-            return handles.get(f.owner + "." + f.name);
-        }
-        if (src instanceof MethodInsnNode && src.getOpcode() == Opcodes.INVOKESTATIC) {
-            // jvmdg nest accessor: jvmdowngrader$nest$<...>$get$<FIELD>
-            MethodInsnNode m = (MethodInsnNode) src;
-            int idx = m.name.lastIndexOf("$get$");
-            if (idx > 0 && m.name.startsWith("jvmdowngrader$nest$") && m.desc.equals("()" + STUB_DESC)) {
-                return handles.get(m.owner + "." + m.name.substring(idx + 5));
+            // a private field inlined from another class of the same package (nestmates) needs the
+            // private bit cleared; package access is enough
+            if (p.handle.kind != KIND_ARRAY && !p.handle.owner.equals(cn.name)) {
+                ClassNode oc = node(p.handle.owner);
+                FieldNode f = oc == null ? null : field(oc, p.handle.field);
+                if (f != null && (f.access & (Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) != 0) {
+                    f.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+                    changed.add(p.handle.owner);
+                }
             }
         }
-        return null;
     }
 
-    static boolean samePackage(String a, String b) {
-        int ia = a.lastIndexOf('/'), ib = b.lastIndexOf('/');
-        return ia == ib && (ia < 0 || a.substring(0, ia).equals(b.substring(0, ib)));
-    }
-
-    // ---- helper generation ------------------------------------------------------------------------------
-
-    static MethodNode helper(ClassNode into, Handle h, MethodInsnNode call) {
+    /** Decides whether this callsite can be inlined; returns the plan, or null to leave it on the stub. */
+    static Plan plan(ClassNode cn, Frame<SourceValue> frame, MethodInsnNode call) {
+        if (frame == null) return null;
         String base = opBase(call.name);
         if (base == null || (OPS != null && !OPS.contains(base))) return null;
-        String name = "labs$vh" + h.id + "$" + call.name;
-        String cacheKey = into.name + "." + name;
-        String wantDesc = "(" + STUB_DESC + call.desc.substring(1);
-        MethodNode cached = helperCache.get(cacheKey);
-        if (cached != null) return cached.desc.equals(wantDesc) ? cached : null;
-
         Type[] args = Type.getArgumentTypes(call.desc);
         Type ret = Type.getReturnType(call.desc);
-        MethodNode mn = build(h, base, args, ret, name);
-        if (mn == null) return null;
-        into.methods.add(mn);
-        changed.add(into.name);
-        helperCache.put(cacheKey, mn);
-        return mn;
-    }
+        int recvSlot = frame.getStackSize() - args.length - 1;
+        if (recvSlot < 0) return null;
+        SourceValue recv = frame.getStack(recvSlot);
+        if (recv == null || recv.insns.size() != 1) return null;
+        AbstractInsnNode src = recv.insns.iterator().next();
+        if (!(src instanceof FieldInsnNode) || src.getOpcode() != Opcodes.GETSTATIC) return null;
+        FieldInsnNode gs = (FieldInsnNode) src;
+        Handle h = handles.get(gs.owner + "." + gs.name);
+        if (h == null) return null;
+        if (h.kind != KIND_ARRAY && !samePackage(cn.name, h.owner)) return null;
 
-    // debugging aids: -Dvh.ops=get,set restricts which op families are rewritten (default: all);
-    // -Dvh.exclude=A,B skips rewriting inside classes whose internal name contains A or B
-    static final Set<String> OPS = System.getProperty("vh.ops") == null ? null
-        : new HashSet<>(Arrays.asList(System.getProperty("vh.ops").split(",")));
-    static final String[] EXCLUDE = System.getProperty("vh.exclude") == null ? new String[0]
-        : System.getProperty("vh.exclude").split(",");
+        // the getstatic must sit in the same straight-line region as the call: no labels (jump
+        // targets, try-catch edges), no branches, and no frames between them
+        int hops = 0;
+        for (AbstractInsnNode n = gs.getNext(); n != call; n = n.getNext()) {
+            if (n == null || n instanceof LabelNode || n instanceof FrameNode || n instanceof JumpInsnNode
+                || n instanceof TableSwitchInsnNode || n instanceof LookupSwitchInsnNode
+                || ++hops > 64) return null;
+        }
+
+        Type ft = h.kind == KIND_ARRAY ? h.fieldType.getElementType() : h.fieldType;
+        if (ft.getSort() == Type.FLOAT || ft.getSort() == Type.DOUBLE) return null; // bitwise CAS semantics differ; not needed
+        if (h.kind == KIND_ARRAY && h.fieldType.getDimensions() != 1) return null;
+
+        // expected argument shape
+        int fixed = h.kind == KIND_INSTANCE ? 1 : h.kind == KIND_ARRAY ? 2 : 0;
+        int values = base.equals("get") ? 0 : (base.equals("cas") || base.equals("cax")) ? 2 : 1;
+        if (args.length != fixed + values) return null;
+        if (h.kind != KIND_STATIC && args[0].getSort() != Type.OBJECT) return null;
+        if (h.kind == KIND_ARRAY && args[1].getSort() != Type.INT) return null;
+        for (int i = fixed; i < args.length; i++) if (!compatible(args[i], ft)) return null;
+        if (base.equals("get") || base.equals("cax") || base.equals("gas") || base.equals("gaa") || base.equals("gor")) {
+            if (!compatible(ret, ft)) return null;
+        } else if (base.equals("cas")) {
+            if (ret.getSort() != Type.BOOLEAN) return null;
+        } else { // set
+            if (ret.getSort() != Type.VOID) return null;
+        }
+        if (base.equals("gaa") && ft.getSort() != Type.INT && ft.getSort() != Type.LONG) return null;
+        if (base.equals("gor") && ft.getSort() != Type.INT) return null;
+        if (h.kind == KIND_STATIC && !(base.equals("get") || base.equals("set"))) return null;
+
+        Plan p = new Plan();
+        p.getstatic = gs;
+        p.call = call;
+        p.handle = h;
+        p.base = base;
+        return p;
+    }
 
     static String opBase(String n) {
         if (n.startsWith("compareAndExchange")) return "cax";
@@ -360,115 +394,152 @@ public class VarHandleFixup {
         return null;
     }
 
-    /** Builds the helper body, or returns null when the shape is unsupported (callsite stays on the stub). */
-    static MethodNode build(Handle h, String base, Type[] args, Type ret, String name) {
+    /** Deletes the handle getstatic and replaces the call with the inlined access. */
+    static void apply(MethodNode mn, Plan p) {
+        Handle h = p.handle;
         Type ft = h.kind == KIND_ARRAY ? h.fieldType.getElementType() : h.fieldType;
-        if (ft.getSort() == Type.FLOAT || ft.getSort() == Type.DOUBLE) return null; // bitwise CAS semantics differ; not needed
-        if (h.kind == KIND_ARRAY && h.fieldType.getDimensions() != 1) return null;
-
-        // expected argument shape (after the ignored stub receiver)
+        Type[] args = Type.getArgumentTypes(p.call.desc);
         int fixed = h.kind == KIND_INSTANCE ? 1 : h.kind == KIND_ARRAY ? 2 : 0;
-        int values = base.equals("get") ? 0 : (base.equals("cas") || base.equals("cax")) ? 2 : 1;
-        if (args.length != fixed + values) return null;
-        if (h.kind != KIND_STATIC && args[0].getSort() != Type.OBJECT) return null;
-        if (h.kind == KIND_ARRAY && args[1].getSort() != Type.INT) return null;
-        for (int i = fixed; i < args.length; i++) if (!compatible(args[i], ft)) return null;
-        if (base.equals("get") || base.equals("cax") || base.equals("gas") || base.equals("gaa") || base.equals("gor")) {
-            if (!compatible(ret, ft)) return null;
-        } else if (base.equals("cas")) {
-            if (ret.getSort() != Type.BOOLEAN) return null;
-        } else if (!base.equals("set") || ret.getSort() != Type.VOID) {
-            if (!base.equals("set")) return null;
-            return null;
-        }
-        if (base.equals("gaa") && ft.getSort() != Type.INT && ft.getSort() != Type.LONG) return null;
-        if (base.equals("gor") && ft.getSort() != Type.INT) return null;
+        String owner = h.owner, fname = h.field, fdesc = ft.getDescriptor();
+        String arrType = h.kind == KIND_ARRAY ? h.fieldType.getInternalName() : null;
+        boolean castValue = isRef(ft) && !ft.getInternalName().equals("java/lang/Object");
 
-        StringBuilder desc = new StringBuilder("(").append(STUB_DESC);
-        for (Type a : args) desc.append(a.getDescriptor());
-        desc.append(")").append(ret.getDescriptor());
-        MethodNode mn = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            name, desc.toString(), null, null);
-        InsnList c = mn.instructions;
-
-        // local slots: 0 = stub, then args
-        int[] slot = new int[args.length];
-        int next = 1;
-        for (int i = 0; i < args.length; i++) { slot[i] = next; next += args[i].getSize(); }
-        int scratch = next;
-
-        // loads the target value onto the stack (receiver/index come from arg slots)
-        Runnable loadTarget;
-        Runnable loadRef = null;
-        if (h.kind == KIND_INSTANCE) {
-            loadRef = () -> {
-                c.add(new VarInsnNode(Opcodes.ALOAD, slot[0]));
-                c.add(new TypeInsnNode(Opcodes.CHECKCAST, h.owner));
-            };
-            Runnable lr = loadRef;
-            loadTarget = () -> { lr.run(); c.add(new FieldInsnNode(Opcodes.GETFIELD, h.owner, h.field, ft.getDescriptor())); };
-        } else if (h.kind == KIND_ARRAY) {
-            loadRef = () -> {
-                c.add(new VarInsnNode(Opcodes.ALOAD, slot[0]));
-                c.add(new TypeInsnNode(Opcodes.CHECKCAST, h.fieldType.getInternalName()));
-                c.add(new VarInsnNode(Opcodes.ILOAD, slot[1]));
-            };
-            Runnable lr = loadRef;
-            loadTarget = () -> { lr.run(); c.add(new InsnNode(ft.getOpcode(Opcodes.IALOAD))); };
-        } else {
-            loadTarget = () -> c.add(new FieldInsnNode(Opcodes.GETSTATIC, h.owner, h.field, ft.getDescriptor()));
-        }
-        // stores the value on top of the stack into the target; caller must have run loadRef first (non-static)
-        Runnable storeTarget = () -> {
-            if (h.kind == KIND_INSTANCE) c.add(new FieldInsnNode(Opcodes.PUTFIELD, h.owner, h.field, ft.getDescriptor()));
-            else if (h.kind == KIND_ARRAY) c.add(new InsnNode(ft.getOpcode(Opcodes.IASTORE)));
-            else c.add(new FieldInsnNode(Opcodes.PUTSTATIC, h.owner, h.field, ft.getDescriptor()));
-        };
-        // loads value argument i (absolute index into args), casting refs to the field type
-        java.util.function.IntConsumer loadValue = (i) -> {
-            c.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD), slot[i]));
-            if (isRef(ft) && !ft.getInternalName().equals("java/lang/Object") && isRef(args[i])) {
-                c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
-            }
-        };
-
-        switch (base) {
+        InsnList c = new InsnList();
+        // scratch locals (typed; sized) allocated past the current frame
+        int scratch = mn.maxLocals;
+        int lRef = -1, lIdx = -1, lVal = -1, lExp = -1, lOld = -1;
+        switch (p.base) {
             case "get": {
-                loadTarget.run();
-                c.add(new InsnNode(ret.getOpcode(Opcodes.IRETURN)));
+                // [obj] / [arr, idx] / []
+                if (h.kind == KIND_INSTANCE) {
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, owner));
+                    c.add(new FieldInsnNode(Opcodes.GETFIELD, owner, fname, fdesc));
+                } else if (h.kind == KIND_ARRAY) {
+                    c.add(new InsnNode(Opcodes.SWAP)); // [idx, arr]
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, arrType));
+                    c.add(new InsnNode(Opcodes.SWAP)); // [arr, idx]
+                    c.add(new InsnNode(ft.getOpcode(Opcodes.IALOAD)));
+                } else {
+                    c.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, fname, fdesc));
+                }
                 break;
             }
             case "set": {
-                if (loadRef != null) loadRef.run();
-                loadValue.accept(fixed);
-                storeTarget.run();
-                c.add(new InsnNode(Opcodes.RETURN));
+                Type vt = args[fixed];
+                if (h.kind == KIND_INSTANCE) {
+                    if (vt.getSize() == 1) {
+                        c.add(new InsnNode(Opcodes.SWAP)); // [v, obj]
+                        c.add(new TypeInsnNode(Opcodes.CHECKCAST, owner));
+                        c.add(new InsnNode(Opcodes.SWAP)); // [obj, v]
+                    } else {
+                        lVal = scratch; scratch += 2;
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ISTORE), lVal));
+                        c.add(new TypeInsnNode(Opcodes.CHECKCAST, owner));
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                    }
+                    if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                    c.add(new FieldInsnNode(Opcodes.PUTFIELD, owner, fname, fdesc));
+                } else if (h.kind == KIND_ARRAY) {
+                    // [arr, idx, v]
+                    lVal = scratch; scratch += vt.getSize();
+                    lIdx = scratch; scratch += 1;
+                    c.add(new VarInsnNode(vt.getOpcode(Opcodes.ISTORE), lVal));
+                    c.add(new VarInsnNode(Opcodes.ISTORE, lIdx));
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, arrType));
+                    c.add(new VarInsnNode(Opcodes.ILOAD, lIdx));
+                    c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                    if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                    c.add(new InsnNode(ft.getOpcode(Opcodes.IASTORE)));
+                } else {
+                    if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                    c.add(new FieldInsnNode(Opcodes.PUTSTATIC, owner, fname, fdesc));
+                }
                 break;
             }
             case "gas": case "gaa": case "gor": {
-                int old = scratch;
-                loadTarget.run();
-                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ISTORE), old));
-                if (loadRef != null) loadRef.run();
-                if (base.equals("gas")) {
-                    loadValue.accept(fixed);
-                } else {
-                    c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), old));
-                    loadValue.accept(fixed);
-                    c.add(new InsnNode(ft.getOpcode(base.equals("gaa") ? Opcodes.IADD : Opcodes.IOR)));
+                Type vt = args[fixed];
+                lVal = scratch; scratch += vt.getSize();
+                lOld = scratch; scratch += ft.getSize();
+                c.add(new VarInsnNode(vt.getOpcode(Opcodes.ISTORE), lVal));
+                if (h.kind == KIND_INSTANCE) {
+                    // [obj]
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, owner));
+                    c.add(new InsnNode(Opcodes.DUP)); // [o, o]
+                    c.add(new FieldInsnNode(Opcodes.GETFIELD, owner, fname, fdesc)); // [o, old]
+                    c.add(new VarInsnNode(ft.getOpcode(Opcodes.ISTORE), lOld)); // [o]
+                    if (p.base.equals("gas")) {
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                        if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                    } else {
+                        c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), lOld));
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                        c.add(new InsnNode(ft.getOpcode(p.base.equals("gaa") ? Opcodes.IADD : Opcodes.IOR)));
+                    }
+                    c.add(new FieldInsnNode(Opcodes.PUTFIELD, owner, fname, fdesc)); // []
+                } else { // array
+                    // [arr, idx]
+                    lIdx = scratch; scratch += 1;
+                    lRef = scratch; scratch += 1;
+                    c.add(new VarInsnNode(Opcodes.ISTORE, lIdx));
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, arrType));
+                    c.add(new VarInsnNode(Opcodes.ASTORE, lRef)); // []
+                    c.add(new VarInsnNode(Opcodes.ALOAD, lRef));
+                    c.add(new VarInsnNode(Opcodes.ILOAD, lIdx));
+                    c.add(new InsnNode(ft.getOpcode(Opcodes.IALOAD)));
+                    c.add(new VarInsnNode(ft.getOpcode(Opcodes.ISTORE), lOld));
+                    c.add(new VarInsnNode(Opcodes.ALOAD, lRef));
+                    c.add(new VarInsnNode(Opcodes.ILOAD, lIdx));
+                    if (p.base.equals("gas")) {
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                        if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                    } else {
+                        c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), lOld));
+                        c.add(new VarInsnNode(vt.getOpcode(Opcodes.ILOAD), lVal));
+                        c.add(new InsnNode(ft.getOpcode(p.base.equals("gaa") ? Opcodes.IADD : Opcodes.IOR)));
+                    }
+                    c.add(new InsnNode(ft.getOpcode(Opcodes.IASTORE)));
                 }
-                storeTarget.run();
-                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), old));
-                c.add(new InsnNode(ret.getOpcode(Opcodes.IRETURN)));
+                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), lOld));
                 break;
             }
             case "cas": case "cax": {
-                int old = scratch;
-                LabelNode fail = new LabelNode();
+                Type et = args[fixed], nt = args[fixed + 1];
+                lVal = scratch; scratch += nt.getSize();  // new value
+                lExp = scratch; scratch += et.getSize();  // expected
+                lRef = scratch; scratch += 1;             // receiver (instance/array)
+                lIdx = scratch; scratch += 1;             // array index
+                lOld = scratch; scratch += ft.getSize();
+                LabelNode fail = new LabelNode(), end = new LabelNode();
+                final int fRef = lRef, fIdx = lIdx;
+                c.add(new VarInsnNode(nt.getOpcode(Opcodes.ISTORE), lVal));
+                c.add(new VarInsnNode(et.getOpcode(Opcodes.ISTORE), lExp));
+                Runnable loadTarget, storePrep;
+                if (h.kind == KIND_ARRAY) {
+                    c.add(new VarInsnNode(Opcodes.ISTORE, lIdx));
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, arrType));
+                    c.add(new VarInsnNode(Opcodes.ASTORE, lRef));
+                    loadTarget = () -> {
+                        c.add(new VarInsnNode(Opcodes.ALOAD, fRef));
+                        c.add(new VarInsnNode(Opcodes.ILOAD, fIdx));
+                        c.add(new InsnNode(ft.getOpcode(Opcodes.IALOAD)));
+                    };
+                    storePrep = () -> {
+                        c.add(new VarInsnNode(Opcodes.ALOAD, fRef));
+                        c.add(new VarInsnNode(Opcodes.ILOAD, fIdx));
+                    };
+                } else {
+                    c.add(new TypeInsnNode(Opcodes.CHECKCAST, owner));
+                    c.add(new VarInsnNode(Opcodes.ASTORE, lRef));
+                    loadTarget = () -> {
+                        c.add(new VarInsnNode(Opcodes.ALOAD, fRef));
+                        c.add(new FieldInsnNode(Opcodes.GETFIELD, owner, fname, fdesc));
+                    };
+                    storePrep = () -> c.add(new VarInsnNode(Opcodes.ALOAD, fRef));
+                }
                 loadTarget.run();
-                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ISTORE), old));
-                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), old));
-                c.add(new VarInsnNode(args[fixed].getOpcode(Opcodes.ILOAD), slot[fixed])); // expected
+                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ISTORE), lOld));
+                c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), lOld));
+                c.add(new VarInsnNode(et.getOpcode(Opcodes.ILOAD), lExp));
                 switch (ft.getSort()) {
                     case Type.LONG:
                         c.add(new InsnNode(Opcodes.LCMP));
@@ -480,31 +551,36 @@ public class VarHandleFixup {
                     default:
                         c.add(new JumpInsnNode(Opcodes.IF_ICMPNE, fail));
                 }
-                if (loadRef != null) loadRef.run();
-                loadValue.accept(fixed + 1); // new value
-                storeTarget.run();
-                if (base.equals("cas")) {
+                storePrep.run();
+                c.add(new VarInsnNode(nt.getOpcode(Opcodes.ILOAD), lVal));
+                if (castValue) c.add(new TypeInsnNode(Opcodes.CHECKCAST, ft.getInternalName()));
+                if (h.kind == KIND_ARRAY) c.add(new InsnNode(ft.getOpcode(Opcodes.IASTORE)));
+                else c.add(new FieldInsnNode(Opcodes.PUTFIELD, owner, fname, fdesc));
+                if (p.base.equals("cas")) {
                     c.add(new InsnNode(Opcodes.ICONST_1));
-                    c.add(new InsnNode(Opcodes.IRETURN));
+                    c.add(new JumpInsnNode(Opcodes.GOTO, end));
                     c.add(fail);
                     c.add(new InsnNode(Opcodes.ICONST_0));
-                    c.add(new InsnNode(Opcodes.IRETURN));
+                    c.add(end);
                 } else {
                     c.add(fail);
-                    c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), old));
-                    c.add(new InsnNode(ret.getOpcode(Opcodes.IRETURN)));
+                    c.add(new VarInsnNode(ft.getOpcode(Opcodes.ILOAD), lOld));
                 }
                 break;
             }
-            default:
-                return null;
         }
-        mn.maxStack = 8;
-        mn.maxLocals = scratch + 2;
-        return mn;
+        mn.maxLocals = Math.max(mn.maxLocals, scratch);
+        mn.instructions.remove(p.getstatic);
+        mn.instructions.insertBefore(p.call, c);
+        mn.instructions.remove(p.call);
     }
 
     static boolean isRef(Type t) { return t.getSort() == Type.OBJECT || t.getSort() == Type.ARRAY; }
+
+    static boolean samePackage(String a, String b) {
+        int ia = a.lastIndexOf('/'), ib = b.lastIndexOf('/');
+        return ia == ib && (ia < 0 || a.substring(0, ia).equals(b.substring(0, ib)));
+    }
 
     /** callsite type vs field type: same primitive family, or both references (no boxing supported). */
     static boolean compatible(Type callsite, Type ft) {
