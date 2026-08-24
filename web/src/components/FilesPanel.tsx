@@ -3,6 +3,7 @@
 // launcher's ops thread is up.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { unzipSync, zipSync, type Zippable } from "fflate";
 import { files, type FileEntry } from "@/vm/paper";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -32,7 +33,11 @@ export function FilesPanel({ active }: { active: boolean }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ path: string; text: string } | null>(null);
+  const [transfer, setTransfer] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const [importPending, setImportPending] = useState<File | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(
     async (nextSegments?: string[]) => {
@@ -57,11 +62,11 @@ export function FilesPanel({ active }: { active: boolean }) {
     if (!active) return;
     void refresh();
     const timer = setInterval(() => {
-      if (!editing) void refresh();
+      if (!editing && !transfer) void refresh();
     }, 4000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, segments, editing]);
+  }, [active, segments, editing, transfer]);
 
   async function download(entry: FileEntry) {
     try {
@@ -120,6 +125,69 @@ export function FilesPanel({ active }: { active: boolean }) {
       setError(String(err instanceof Error ? err.message : err));
     }
     if (uploadRef.current) uploadRef.current.value = "";
+  }
+
+  async function exportZip() {
+    setTransfer("exporting…");
+    setTransferError(null);
+    try {
+      const tree: Zippable = {};
+      let count = 0;
+      const collect = async (prefix: string[]) => {
+        const listing = await files.list(joinPath(prefix));
+        if (listing.length === 0 && prefix.length > 0) {
+          tree[`${joinPath(prefix)}/`] = new Uint8Array(0);
+          return;
+        }
+        for (const entry of listing) {
+          if (entry.dir) {
+            await collect([...prefix, entry.name]);
+          } else {
+            tree[joinPath(prefix, entry.name)] = await files.read(joinPath(prefix, entry.name));
+            setTransfer(`exporting… ${++count} files`);
+          }
+        }
+      };
+      await collect([]);
+      const zipped = zipSync(tree);
+      const url = URL.createObjectURL(new Blob([zipped as BlobPart], { type: "application/zip" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "paper-server.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setTransferError(`export failed: ${String(err instanceof Error ? err.message : err)}`);
+    } finally {
+      setTransfer(null);
+    }
+  }
+
+  async function importZip(file: File) {
+    setImportPending(null);
+    setTransfer("importing…");
+    setTransferError(null);
+    try {
+      const entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
+      for (const entry of await files.list("")) {
+        await files.remove(entry.name);
+      }
+      let count = 0;
+      for (const [path, data] of Object.entries(entries)) {
+        if (path.endsWith("/")) {
+          await files.mkdir(path.slice(0, -1));
+        } else {
+          await files.write(path, data);
+          setTransfer(`importing… ${++count} files`);
+        }
+      }
+      await refresh([]);
+    } catch (err) {
+      setTransferError(`import failed: ${String(err instanceof Error ? err.message : err)}`);
+    } finally {
+      setTransfer(null);
+      if (importRef.current) importRef.current.value = "";
+    }
   }
 
   async function newFolder() {
@@ -235,6 +303,71 @@ export function FilesPanel({ active }: { active: boolean }) {
           </ul>
         </div>
       )}
+
+      <div className="border-rule flex flex-wrap items-center gap-1.5 border-t-2 px-4 py-2.5">
+        <Button variant="secondary" size="sm" disabled={!active || !!transfer} onClick={() => void exportZip()}>
+          Export filesystem
+        </Button>
+        <Button variant="secondary" size="sm" disabled={!active || !!transfer} onClick={() => importRef.current?.click()}>
+          Import filesystem
+        </Button>
+        <input
+          ref={importRef}
+          type="file"
+          accept=".zip,application/zip"
+          className="hidden"
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) setImportPending(file);
+          }}
+        />
+        {transfer ? (
+          <span className="text-muted-foreground font-mono text-xs" role="status">
+            {transfer}
+          </span>
+        ) : transferError ? (
+          <span className="text-destructive font-mono text-xs" role="alert">
+            {transferError}
+          </span>
+        ) : null}
+      </div>
+
+      {importPending ? (
+        <div
+          className="bg-black/55 fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm filesystem import"
+        >
+          <div className="border-border bg-background flex w-full max-w-md flex-col border-2 shadow-hard-lg">
+            <p className="border-rule font-display border-b-2 px-4 py-2.5 text-xs uppercase">
+              import filesystem
+            </p>
+            <p className="p-4 font-mono text-sm leading-relaxed">
+              Importing <span className="break-all">{importPending.name}</span> will{" "}
+              <strong>replace all current files</strong> on the server, including worlds and
+              configs. This cannot be undone.
+            </p>
+            <div className="border-rule flex justify-end gap-2 border-t-2 px-4 py-2.5">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setImportPending(null);
+                  if (importRef.current) importRef.current.value = "";
+                }}
+              >
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => void importZip(importPending)}>
+                Replace files
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {editing ? (
         <div
