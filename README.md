@@ -1,5 +1,7 @@
 # Paper in the browser
 
+![Run an extremely slow Minecraft server from your browser tab](docs/hero.png)
+
 A real Minecraft server, running in a browser tab. Live at [paper.labs.lodeway.app](https://paper.labs.lodeway.app).
 
 This is the first [Lodeway Labs](https://labs.lodeway.app) experiment: [Paper](https://papermc.io) 26.2, ported to Java 8 bytecode and executed by [CheerpJ](https://cheerpj.com), a JVM written in WebAssembly and JavaScript. The world lives in your browser's storage. A WebSocket tunnel gives every visitor their own address, so a real Minecraft Java client can join the server running in your tab.
