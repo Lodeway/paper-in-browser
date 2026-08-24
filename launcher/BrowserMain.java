@@ -80,14 +80,6 @@ public class BrowserMain {
             if (new File(cwd, "server.properties").delete()) bridge.println("[labs] removed previous server.properties");
         }
         seedWorld(cwd, bridge);
-        // Paper's configurate-based configs cannot be read back on this JVM: their record-backed
-        // sections deserialize through a zero-argument constructor that downgraded records do not
-        // have, so a second boot dies in initializeGlobalConfiguration. Until the stubs learn
-        // records, regenerate those files from defaults every boot (server.properties, bukkit.yml,
-        // spigot.yml and the world all persist normally).
-        for (String stale : new String[] {"config/paper-global.yml", "config/paper-world-defaults.yml", "world/paper-world.yml", "world_nether/paper-world.yml", "world_the_end/paper-world.yml"}) {
-            new File(cwd, stale).delete();
-        }
         // spark's background profiler samples ThreadMXBean, which this JVM does not implement; keep spark (commands,
         // tick reporting) but do not start the background sampler.
         File sparkDir = new File(new File(cwd, "plugins"), "spark");
