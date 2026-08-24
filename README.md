@@ -62,6 +62,10 @@ The most useful changes are in [patches/](patches/) and [tools/](tools/): anythi
 
 If you change a patch, `make verify` before opening a PR. It catches most Java 8 regressions in under a minute.
 
+## Acknowledgements
+
+The server this repo ports is [Paper](https://github.com/PaperMC/Paper), built by the PaperMC team and community. [Minecraft](https://www.minecraft.net) itself is the property of Mojang Studios and Microsoft.
+
 ## License
 
 The MIT license in [LICENSE](LICENSE) covers only the code original to this repo: `launcher/`, `scripts/`, `server/`, `sources/`, `web/`, and the fixup and analyzer tooling in `tools/`.
