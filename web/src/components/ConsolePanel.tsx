@@ -12,6 +12,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { VmStatus } from "@/vm/paper";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { redactIps } from "@/lib/redact";
 
 export interface TermWriter {
   line(text: string): void;
@@ -94,11 +95,13 @@ export function ConsolePanel({
     });
     observer.observe(mount);
 
+    // Every write goes through redactIps: the console is the screenshottable part of the page,
+    // and server logs carry connecting players' real addresses.
     onReady({
-      line: text => term.writeln(text),
-      dim: text => term.writeln(`\x1b[2m${text}\x1b[0m`),
-      green: text => term.writeln(`\x1b[32m${text}\x1b[0m`),
-      red: text => term.writeln(`\x1b[31m${text}\x1b[0m`),
+      line: text => term.writeln(redactIps(text)),
+      dim: text => term.writeln(`\x1b[2m${redactIps(text)}\x1b[0m`),
+      green: text => term.writeln(`\x1b[32m${redactIps(text)}\x1b[0m`),
+      red: text => term.writeln(`\x1b[31m${redactIps(text)}\x1b[0m`),
     });
 
     return () => {
