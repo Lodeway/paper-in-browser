@@ -48,7 +48,7 @@ const STEPS: { key: string; title: string; body: string; glyph: GlyphCell[] }[] 
   {
     key: "01 / bytecode",
     title: "Paper, ported to Java 8",
-    body: "Paper 26.2 is built for Java 25. JVMDowngrader rewrites each jar down to Java 8 bytecode ahead of time; Java 8 is the newest class format CheerpJ executes.",
+    body: "Paper 26.2 is built for Java 25. JVMDowngrader rewrites each jar down to Java 8 bytecode ahead of time; CheerpJ also runs newer bytecode, but its Java 8 runtime is by far the fastest.",
     glyph: [
       { col: "1 / 3", row: "1 / 3", ink: "ink" },
       { col: "3", row: "2", ink: "pale" },
