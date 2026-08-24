@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 41.569 48" width="41.569" height="48">
+  <!--
+    The wordmark's block, as a file.
+
+    Not hand-drawn: this is exactly what `IsoCube` renders. `buildScene([[1]])` at
+    unit 24 with no padding, projected through iso/blocks.ts (yaw 315 degrees, pitch
+    atan(1/sqrt 2)) and shaded by the engine's own three-face model, top 1 / south 0.8 /
+    east 0.6 over the survey green #2E7D3A. The fills are that multiply resolved:
+    #2E7D3A, #25642E, #1C4B23.
+
+    It is a file rather than the component because a favicon is requested by the
+    browser before any bundle runs, and because a tab icon must not change shape when
+    the theme does. So the green is literal here rather than the iso-signal custom
+    property. It is the one colour that is identical in both themes anyway
+    (globals.css).
+
+    NO COMMENT IN THIS FILE MAY CONTAIN A DOUBLE HYPHEN.
+
+    A standalone .svg is parsed as XML, and XML forbids that sequence inside a
+    comment. It is a fatal well-formedness error rather than a warning, and because
+    this file is fetched as an IMAGE the browser reports it nowhere: it simply draws
+    nothing. This comment used to name the CSS variable with its two leading hyphens
+    written out, and the consequence was that the tab icon never once rendered between
+    the day it shipped and ticket 50. Every browser fell back to the blank-page glyph
+    the icon was added to remove, and the markup looked perfect the whole time.
+
+    icons/generate.test.ts fails on the sequence so it cannot be reintroduced, and
+    `make favicon` rasterises this file through librsvg, which is equally strict.
+  -->
+  <polygon points="20.785,0 41.569,12 20.785,24 0,12" fill="#2e7d3a"/>
+  <polygon points="0,12 20.785,24 20.785,48 0,36" fill="#25642e"/>
+  <polygon points="41.569,12 20.785,24 20.785,48 41.569,36" fill="#1c4b23"/>
+</svg>

@@ -1,0 +1,478 @@
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/task/ChunkLightTask.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/task/ChunkLightTask.java
+index 4538ccf..c5f2ef3 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/task/ChunkLightTask.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/task/ChunkLightTask.java
+@@ -18,7 +18,7 @@ import java.util.function.BooleanSupplier;
+ 
+ public final class ChunkLightTask extends ChunkProgressionTask {
+ 
+-    private static final Logger LOGGER = LogManager.getLogger();
++    private static final Logger LOGGER = LogManager.getLogger(ChunkLightTask.class); // Paper - Java 8: explicit class; caller detection is not available on every JVM
+ 
+     private final ChunkAccess fromChunk;
+ 
+diff --git a/ca/spottedleaf/moonrise/patches/starlight/light/SWMRNibbleArray.java b/ca/spottedleaf/moonrise/patches/starlight/light/SWMRNibbleArray.java
+index 5c7b380..485d853 100644
+--- a/ca/spottedleaf/moonrise/patches/starlight/light/SWMRNibbleArray.java
++++ b/ca/spottedleaf/moonrise/patches/starlight/light/SWMRNibbleArray.java
+@@ -150,13 +150,10 @@ public final class SWMRNibbleArray {
+         }
+     }
+ 
+-    private static final VarHandle LONG_VIEW = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
+-
++    // Paper - Java 8: no VarHandle; plain byte scan
+     private static boolean isAllZero(final byte[] data) {
+-        final int len = data.length / Long.BYTES; // assume divisible
+-
+-        for (int i = 0; i < len; ++i) {
+-            if (0L != (long)LONG_VIEW.get(data, i << 3)) {
++        for (final byte b : data) {
++            if (b != 0) {
+                 return false;
+             }
+         }
+diff --git a/io/papermc/paper/util/KeepAlive.java b/io/papermc/paper/util/KeepAlive.java
+index 66d6af2..db5f871 100644
+--- a/io/papermc/paper/util/KeepAlive.java
++++ b/io/papermc/paper/util/KeepAlive.java
+@@ -2,7 +2,7 @@ package io.papermc.paper.util;
+ 
+ public class KeepAlive {
+ 
+-    public long lastKeepAliveTx = System.nanoTime();
++    public volatile long lastKeepAliveTx = System.nanoTime(); // Paper - Java 8 - off-main keepalives - written from tick loop and event loop
+     public static final record KeepAliveResponse(long txTimeNS, long rxTimeNS) {
+         public long latencyNS() {
+             return this.rxTimeNS - this.txTimeNS;
+diff --git a/net/minecraft/SystemReport.java b/net/minecraft/SystemReport.java
+index f7026c1..2b200c8 100644
+--- a/net/minecraft/SystemReport.java
++++ b/net/minecraft/SystemReport.java
+@@ -64,12 +64,38 @@ public class SystemReport {
+         this.setDetail("Memory (heap)", () -> printMemoryUsage(ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()));
+         this.setDetail("Memory (non-head)", () -> printMemoryUsage(ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage()));
+         this.setDetail("CPUs", () -> String.valueOf(Runtime.getRuntime().availableProcessors()));
++        // Paper start - Java 8: OSHI needs JNA's native library; on JVMs where it cannot load, report JVM-provided details instead
++        if (nativeSystemInfoAvailable()) {
+         this.ignoreErrors("hardware", () -> this.putHardware(new SystemInfo()));
+         this.ignoreErrors("software", () -> this.putSoftware(new SystemInfo()));
++        } else {
++            this.setDetail("Operating System Version", () -> System.getProperty("os.name") + " " + System.getProperty("os.version") + " (" + System.getProperty("os.arch") + ")");
++            this.setDetail("Processor Name", () -> "unknown (native hardware probing unavailable on this JVM)");
++            this.setDetail("Processor Count", () -> String.valueOf(Runtime.getRuntime().availableProcessors()));
++        }
++        // Paper end - Java 8
+         this.setDetail("JVM Flags", () -> printJvmFlags(arg -> arg.startsWith("-X")));
+         this.setDetail("Debug Flags", () -> printJvmFlags(arg -> arg.startsWith("-DMC_DEBUG_")));
+     }
+ 
++    // Paper start - Java 8
++    private static Boolean nativeSystemInfo;
++
++    private static synchronized boolean nativeSystemInfoAvailable() {
++        if (nativeSystemInfo == null) {
++            try {
++                // Touching Native's static state loads JNA's native library; OSHI cannot work without it.
++                Class.forName("com.sun.jna.Native", true, SystemReport.class.getClassLoader());
++                nativeSystemInfo = Boolean.TRUE;
++            } catch (final Throwable t) {
++                LOGGER.info("Native hardware probing is unavailable on this JVM ({}: JNA's native library could not be loaded); system reports will only include JVM-provided details", t.getClass().getSimpleName());
++                nativeSystemInfo = Boolean.FALSE;
++            }
++        }
++        return nativeSystemInfo;
++    }
++    // Paper end - Java 8
++
+     private static String printMemoryUsage(final MemoryUsage memoryUsage) {
+         return String.format(
+             Locale.ROOT,
+diff --git a/net/minecraft/network/protocol/PacketUtils.java b/net/minecraft/network/protocol/PacketUtils.java
+index 144c18c..51139aa 100644
+--- a/net/minecraft/network/protocol/PacketUtils.java
++++ b/net/minecraft/network/protocol/PacketUtils.java
+@@ -25,6 +25,24 @@ public class PacketUtils {
+         }
+     }
+ 
++    // Paper start - Java 8 - exception-free reschedule for hot packet handlers
++    // Behaviorally identical to ensureRunningOnSameThread, but reports the off-thread case through the
++    // return value instead of throwing RUNNING_ON_DIFFERENT_THREAD through the handler (Connection swallows
++    // that exception anyway). CheerpJ's JIT permanently bails on any method a callee's exception escapes
++    // through during warmup, which kept the per-tick movement/input handlers interpreted.
++    public static <T extends PacketListener> boolean rescheduledOffThread(final Packet<T> packet, final T listener, final ServerLevel level) {
++        return rescheduledOffThread(packet, listener, level.getServer().packetProcessor());
++    }
++
++    public static <T extends PacketListener> boolean rescheduledOffThread(final Packet<T> packet, final T listener, final PacketProcessor packetProcessor) {
++        if (!packetProcessor.isSameThread()) {
++            packetProcessor.scheduleIfPossible(listener, packet);
++            return true;
++        }
++        return false;
++    }
++    // Paper end - Java 8 - exception-free reschedule for hot packet handlers
++
+     public static <T extends PacketListener> ReportedException makeReportedException(final Exception cause, final Packet<T> packet, final T listener) {
+         if (cause instanceof ReportedException re) {
+             fillCrashReport(re.getReport(), listener, packet);
+diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
+index 0b6d7f9..cf7b5e1 100644
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -281,6 +281,14 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         // Paper end - Unix domain socket support
+ 
+         this.initializeKeyPair();
++        // Paper start - Java 8: in-JVM transport for environments without sockets (e.g. browser-hosted JVMs)
++        if (io.papermc.paper.network.LocalTransport.enabled()) {
++            final io.netty.channel.local.LocalAddress localAddress = io.papermc.paper.network.LocalTransport.listenAddress();
++            LOGGER.info("Starting Minecraft server on in-JVM local channel {} (paper.network.transport=local); clients connect through an in-process bridge", localAddress);
++            this.getConnection().startTcpServerListener(localAddress);
++            io.papermc.paper.network.LocalTransport.bound(localAddress);
++        } else {
++        // Paper end - Java 8
+         LOGGER.info("Starting Minecraft server on {}:{}", this.getLocalIp().isEmpty() ? "*" : this.getLocalIp(), this.getPort());
+ 
+         try {
+@@ -292,6 +300,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+             if (true) throw new IllegalStateException("Failed to bind to port", e); // Paper - Propagate failed to bind to port error
+             return false;
+         }
++        } // Paper - Java 8
+ 
+         // CraftBukkit start
+         this.server.loadPlugins();
+diff --git a/net/minecraft/server/dedicated/DedicatedServerProperties.java b/net/minecraft/server/dedicated/DedicatedServerProperties.java
+index 639a540..1ffecb1 100644
+--- a/net/minecraft/server/dedicated/DedicatedServerProperties.java
++++ b/net/minecraft/server/dedicated/DedicatedServerProperties.java
+@@ -54,7 +54,7 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+     public static final String MANAGEMENT_SERVER_TLS_ENABLED_KEY = "management-server-tls-enabled";
+     public static final String MANAGEMENT_SERVER_TLS_KEYSTORE_KEY = "management-server-tls-keystore";
+     public static final String MANAGEMENT_SERVER_TLS_KEYSTORE_PASSWORD_KEY = "management-server-tls-keystore-password";
+-    public final boolean onlineMode = this.get("online-mode", true);
++    public final boolean onlineMode = this.get("online-mode", false); // Paper - Java 8 - default offline-mode (no encryption handshake)
+     public final boolean preventProxyConnections = this.get("prevent-proxy-connections", false);
+     public final String serverIp = this.get("server-ip", "");
+     public final Settings<DedicatedServerProperties>.MutableValue<Boolean> allowFlight = this.getMutable("allow-flight", false);
+@@ -102,10 +102,10 @@ public class DedicatedServerProperties extends Settings<DedicatedServerPropertie
+     public final int rateLimitPacketsPerSecond = this.get("rate-limit", 0);
+     public final int commandSpamThresholdSeconds = this.get("command-spam-threshold-seconds", 10);
+     public final int chatSpamThresholdSeconds = this.get("chat-spam-threshold-seconds", 10);
+-    public final Settings<DedicatedServerProperties>.MutableValue<Integer> viewDistance = this.getMutable("view-distance", 10);
+-    public final Settings<DedicatedServerProperties>.MutableValue<Integer> simulationDistance = this.getMutable("simulation-distance", 10);
++    public final Settings<DedicatedServerProperties>.MutableValue<Integer> viewDistance = this.getMutable("view-distance", 2); // Paper - Java 8 - lower default distances
++    public final Settings<DedicatedServerProperties>.MutableValue<Integer> simulationDistance = this.getMutable("simulation-distance", 2); // Paper - Java 8 - lower default distances
+     public final Settings<DedicatedServerProperties>.MutableValue<Integer> maxPlayers = this.getMutable("max-players", 20);
+-    public final int networkCompressionThreshold = this.get("network-compression-threshold", 256);
++    public final int networkCompressionThreshold = this.get("network-compression-threshold", -1); // Paper - Java 8 - default compression off
+     public final boolean broadcastRconToOps = this.get("broadcast-rcon-to-ops", true);
+     public final boolean broadcastConsoleToOps = this.get("broadcast-console-to-ops", true);
+     public final int maxWorldSize = this.get("max-world-size", v -> Mth.clamp(v, 1, 29999984), 29999984);
+diff --git a/net/minecraft/server/dedicated/ServerWatchdog.java b/net/minecraft/server/dedicated/ServerWatchdog.java
+index dfab2ad..efdccfc 100644
+--- a/net/minecraft/server/dedicated/ServerWatchdog.java
++++ b/net/minecraft/server/dedicated/ServerWatchdog.java
+@@ -23,8 +23,7 @@ public class ServerWatchdog implements Runnable {
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private static final long MAX_SHUTDOWN_TIME = 10000L;
+     private static final int SHUTDOWN_STATUS = 1;
+-    private static final Comparator<ThreadInfo> THREAD_INFO_COMPARATOR = Comparator.comparing(ThreadInfo::isDaemon)
+-        .thenComparing(ThreadInfo::getThreadState)
++    private static final Comparator<ThreadInfo> THREAD_INFO_COMPARATOR = Comparator.comparing(ThreadInfo::getThreadState) // Paper - Java 8: ThreadInfo#isDaemon does not exist
+         .thenComparing(ThreadInfo::getThreadName);
+     private final DedicatedServer server;
+     private final long maxTickTimeNanos;
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 5dbb284..8add068 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -52,6 +52,13 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+     // CraftBukkit end
+     public final java.util.Map<java.util.UUID, net.kyori.adventure.resource.ResourcePackCallback> packCallbacks = new java.util.concurrent.ConcurrentHashMap<>(); // Paper - adventure resource pack callbacks
+     private static final long KEEPALIVE_LIMIT = Long.getLong("paper.playerconnection.keepalive", 30) * 1000; // Paper - provide property to set keepalive limit
++    // Paper start - Java 8 - off-main keepalives: on runtimes where the main thread can stall for tens of seconds
++    // (CheerpJ's single cooperative thread during the join chunk burst), keepalives sent only from the tick loop stop
++    // flowing and the client disconnects after 30s. Responses are already handled off-main (see handleKeepAlive); this
++    // sends them off-main too, from the channel's event loop, so a stalled tick loop no longer starves the connection.
++    private static final boolean KEEPALIVE_OFF_MAIN = Boolean.getBoolean("paper.keepAliveOffMain");
++    private volatile java.util.concurrent.ScheduledFuture<?> offMainKeepAlive;
++    // Paper end - Java 8 - off-main keepalives
+     protected static final net.minecraft.resources.Identifier MINECRAFT_BRAND = net.minecraft.resources.Identifier.withDefaultNamespace("brand"); // Paper - Brand support
+     // Paper start - retain certain values
+     public @Nullable String clientBrand;
+@@ -70,6 +77,18 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+         this.pluginMessagerChannels = cookie.channels();
+         this.keepAlive = cookie.keepAlive();
+         // Paper end
++        // Paper start - Java 8 - off-main keepalives
++        if (KEEPALIVE_OFF_MAIN && connection.channel != null) {
++            this.offMainKeepAlive = connection.channel.eventLoop().scheduleWithFixedDelay(() -> {
++                if (this.closed || !this.connection.isConnected() || this.connection.getPacketListener() != this) {
++                    final java.util.concurrent.ScheduledFuture<?> future = this.offMainKeepAlive;
++                    if (future != null) future.cancel(false);
++                    return;
++                }
++                this.trySendKeepAlive();
++            }, 1L, 1L, java.util.concurrent.TimeUnit.SECONDS);
++        }
++        // Paper end - Java 8 - off-main keepalives
+     }
+ 
+     // Paper start - configuration phase API
+@@ -260,13 +279,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+         if (this.checkIfClosed(now)) {
+             long currTime = System.nanoTime();
+ 
+-            if ((currTime - this.keepAlive.lastKeepAliveTx) >= java.util.concurrent.TimeUnit.SECONDS.toNanos(1L)) {
+-                this.keepAlive.lastKeepAliveTx = currTime;
+-
+-                io.papermc.paper.util.KeepAlive.PendingKeepAlive pka = new io.papermc.paper.util.KeepAlive.PendingKeepAlive(currTime, now);
+-                this.keepAlive.pendingKeepAlives.add(pka);
+-                this.send(new ClientboundKeepAlivePacket(pka.challengeId()));
+-            }
++            this.trySendKeepAlive(); // Paper - Java 8 - off-main keepalives - extracted so the event-loop pump can share it
+ 
+             io.papermc.paper.util.KeepAlive.PendingKeepAlive oldest = this.keepAlive.pendingKeepAlives.peek();
+             if (oldest != null && (currTime - oldest.txTimeNS()) > java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(KEEPALIVE_LIMIT)) {
+@@ -279,6 +292,22 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+         Profiler.get().pop();
+     }
+ 
++    // Paper start - Java 8 - off-main keepalives
++    /** Sends a keepalive if none was sent in the last second. Called from the tick loop and, when
++     * {@code paper.keepAliveOffMain} is set, from the channel's event loop; a race between the two at worst
++     * sends one extra keepalive, which the client answers like any other. */
++    private void trySendKeepAlive() {
++        long currTime = System.nanoTime();
++        if ((currTime - this.keepAlive.lastKeepAliveTx) >= java.util.concurrent.TimeUnit.SECONDS.toNanos(1L)) {
++            this.keepAlive.lastKeepAliveTx = currTime;
++
++            io.papermc.paper.util.KeepAlive.PendingKeepAlive pka = new io.papermc.paper.util.KeepAlive.PendingKeepAlive(currTime, Util.getMillis());
++            this.keepAlive.pendingKeepAlives.add(pka);
++            this.send(new ClientboundKeepAlivePacket(pka.challengeId()));
++        }
++    }
++    // Paper end - Java 8 - off-main keepalives
++
+     private boolean checkIfClosed(final long now) {
+         if (this.closed) {
+             if (now - this.closedListenerTime >= 15000L) {
+diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
+index 8a2f1eb..eafc19b 100644
+--- a/net/minecraft/server/network/ServerConnectionListener.java
++++ b/net/minecraft/server/network/ServerConnectionListener.java
+@@ -74,7 +74,7 @@ public class ServerConnectionListener {
+     public void startTcpServerListener(SocketAddress address) throws IOException {
+         // Paper end - Unix domain socket support
+         synchronized (this.channels) {
+-            EventLoopGroupHolder eventLoopGroupHolder = EventLoopGroupHolder.remote(address, this.server.useNativeTransport()); // Paper - Unix domain socket support
++            EventLoopGroupHolder eventLoopGroupHolder = address instanceof io.netty.channel.local.LocalAddress ? EventLoopGroupHolder.local() : EventLoopGroupHolder.remote(address, this.server.useNativeTransport()); // Paper - Unix domain socket support // Paper - Java 8: in-JVM local transport
+             // Paper start - Warn people with console access that HAProxy is in use.
+             if (io.papermc.paper.configuration.GlobalConfiguration.get().proxies.proxyProtocol) {
+                 LOGGER.warn("Using HAProxy, please ensure the server port is adequately firewalled.");
+@@ -109,7 +109,9 @@ public class ServerConnectionListener {
+                                         ? new RateKickingConnection(rateLimitPacketsPerSecond)
+                                         : new Connection(PacketFlow.SERVERBOUND);
+                                     // Paper start - Add support for Proxy Protocol
+-                                    if (io.papermc.paper.configuration.GlobalConfiguration.get().proxies.proxyProtocol) {
++                                    // Paper start - Java 8: in-JVM bridges (local transport) always send a PROXY header with the real client address
++                                    if (io.papermc.paper.configuration.GlobalConfiguration.get().proxies.proxyProtocol || address instanceof io.netty.channel.local.LocalAddress) {
++                                    // Paper end - Java 8
+                                         channel.pipeline().addAfter(HandlerNames.TIMEOUT, "haproxy-decoder", new io.netty.handler.codec.haproxy.HAProxyMessageDecoder());
+                                         channel.pipeline().addAfter("haproxy-decoder", "haproxy-handler", new ChannelInboundHandlerAdapter() {
+                                             @Override
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index c2aba28..d3875b0 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -493,7 +493,7 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void handlePlayerInput(final ServerboundPlayerInputPacket packet) {
+-        PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        if (PacketUtils.rescheduledOffThread(packet, this, this.player.level())) return; // Paper - Java 8 - exception-free reschedule for hot packet handlers
+         // CraftBukkit start
+         if (!packet.input().equals(this.player.getLastClientInput())) {
+             PlayerInputEvent event = new PlayerInputEvent(this.player.getBukkitEntity(), new org.bukkit.craftbukkit.CraftInput(packet.input()));
+@@ -1464,7 +1464,7 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void handleMovePlayer(final ServerboundMovePlayerPacket packet) {
+-        PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        if (PacketUtils.rescheduledOffThread(packet, this, this.player.level())) return; // Paper - Java 8 - exception-free reschedule for hot packet handlers
+         if (containsInvalidValues(packet.getX(0.0), packet.getY(0.0), packet.getZ(0.0), packet.getYRot(0.0F), packet.getXRot(0.0F))) {
+             this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
+         } else {
+@@ -2702,7 +2702,7 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void handlePlayerCommand(final ServerboundPlayerCommandPacket packet) {
+-        PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        if (PacketUtils.rescheduledOffThread(packet, this, this.player.level())) return; // Paper - Java 8 - exception-free reschedule for hot packet handlers
+         if (this.hasClientLoaded()) {
+             // CraftBukkit start
+             if (this.player.isRemoved()) return;
+@@ -3730,7 +3730,7 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void handleClientTickEnd(final ServerboundClientTickEndPacket packet) {
+-        PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        if (PacketUtils.rescheduledOffThread(packet, this, this.player.level())) return; // Paper - Java 8 - exception-free reschedule for hot packet handlers
+         this.tickEndEvent.callEvent(); // Paper - add client tick end event
+         if (!this.receivedMovementThisTick) {
+             this.player.setKnownMovement(Vec3.ZERO);
+diff --git a/net/minecraft/server/network/ServerHandshakePacketListenerImpl.java b/net/minecraft/server/network/ServerHandshakePacketListenerImpl.java
+index 649f964..f92eea1 100644
+--- a/net/minecraft/server/network/ServerHandshakePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerHandshakePacketListenerImpl.java
+@@ -99,7 +99,7 @@ public class ServerHandshakePacketListenerImpl implements ServerHandshakePacketL
+                 }
+             }
+         } catch (Throwable t) {
+-            org.apache.logging.log4j.LogManager.getLogger().debug("Failed to check connection throttle", t);
++            org.apache.logging.log4j.LogManager.getLogger(ServerHandshakePacketListenerImpl.class).debug("Failed to check connection throttle", t); // Paper - Java 8: explicit class
+         }
+         // Paper end - Connection throttle
+         if (packet.protocolVersion() != SharedConstants.getCurrentVersion().protocolVersion()) {
+diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+index 1d892a8..c8631f2 100644
+--- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+@@ -55,7 +55,12 @@ import org.bukkit.event.player.PlayerPreLoginEvent;
+ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener, TickablePacketListener {
+     private static final AtomicInteger UNIQUE_THREAD_ID = new AtomicInteger(0);
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private static final java.util.concurrent.ExecutorService authenticatorPool = java.util.concurrent.Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("User Authenticator #", 0).uncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER)).factory()); // Paper - Virtual authenticator threads
++    private static final java.util.concurrent.ExecutorService authenticatorPool = java.util.concurrent.Executors.newCachedThreadPool(runnable -> { // Paper - Virtual authenticator threads // Paper - Java 8: no virtual threads, use a cached platform thread pool
++        final Thread thread = new Thread(runnable, "User Authenticator #" + UNIQUE_THREAD_ID.getAndIncrement());
++        thread.setDaemon(true);
++        thread.setUncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER));
++        return thread;
++    });
+     private static final int MAX_TICKS_BEFORE_LOGIN = 600;
+     private final byte[] challenge;
+     private final MinecraftServer server;
+@@ -333,7 +338,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         final org.bukkit.craftbukkit.CraftServer server = ServerLoginPacketListenerImpl.this.server.server;
+ 
+         // Paper start - Add more fields to AsyncPlayerPreLoginEvent
+-        final InetAddress rawAddress = ((InetSocketAddress) this.connection.channel.remoteAddress()).getAddress();
++        final InetAddress rawAddress = io.papermc.paper.network.LocalTransport.rawAddress(this.connection.channel); // Paper - Java 8: local transport has no socket address
+         com.destroystokyo.paper.profile.PlayerProfile profile = com.destroystokyo.paper.profile.CraftPlayerProfile.asBukkitCopy(gameprofile); // Paper - setPlayerProfileAPI
+         AsyncPlayerPreLoginEvent asyncEvent = new AsyncPlayerPreLoginEvent(playerName, address, rawAddress, uniqueId, this.transferred, profile, this.connection.hostname, this.paperLoginConnection); // Paper
+         server.getPluginManager().callEvent(asyncEvent);
+diff --git a/net/minecraft/util/Util.java b/net/minecraft/util/Util.java
+index b2f5bd1..53a9a3c 100644
+--- a/net/minecraft/util/Util.java
++++ b/net/minecraft/util/Util.java
+@@ -240,7 +240,7 @@ public class Util {
+                 thread.setPriority(Thread.NORM_PRIORITY + priorityModifier); // Paper - Deprioritize over main
+                 thread.setName(threadName);
+                 return thread;
+-            }, Util::onThreadException, true, 0, Integer.MAX_VALUE, 1, null, 365, TimeUnit.DAYS); // Paper - do not expire threads
++            }, Util::onThreadException, true); // Paper - do not expire threads // Paper - Java 8: use the 4-arg ForkJoinPool constructor
+         }
+ 
+         return new TracingExecutor(executor);
+diff --git a/net/minecraft/util/filefix/FileFixUtil.java b/net/minecraft/util/filefix/FileFixUtil.java
+index 6f7756b..30c45ee 100644
+--- a/net/minecraft/util/filefix/FileFixUtil.java
++++ b/net/minecraft/util/filefix/FileFixUtil.java
+@@ -22,7 +22,7 @@ public class FileFixUtil {
+                 LOGGER.warn("Target already exists, skipping move from {} to {}", from, to);
+             } else {
+                 FileUtil.createDirectoriesSafe(toAbsolute.getParent());
+-                Files.move(fromAbsolute, toAbsolute, StandardCopyOption.COPY_ATTRIBUTES);
++                io.papermc.paper.util.FileCopies.move(fromAbsolute, toAbsolute, StandardCopyOption.COPY_ATTRIBUTES); // Paper - Java 8: attribute-tolerant move
+             }
+         }
+     }
+diff --git a/net/minecraft/util/filefix/virtualfilesystem/FileNode.java b/net/minecraft/util/filefix/virtualfilesystem/FileNode.java
+index c77e5bd..1e68204 100644
+--- a/net/minecraft/util/filefix/virtualfilesystem/FileNode.java
++++ b/net/minecraft/util/filefix/virtualfilesystem/FileNode.java
+@@ -18,7 +18,7 @@ final class FileNode extends Node {
+     public void ensureCopy() throws IOException {
+         if (!this.isCopy) {
+             Path tempFile = this.path.getFileSystem().createTemporaryFilePath();
+-            Files.copy(this.storagePath, tempFile, StandardCopyOption.COPY_ATTRIBUTES);
++            io.papermc.paper.util.FileCopies.copy(this.storagePath, tempFile, StandardCopyOption.COPY_ATTRIBUTES); // Paper - Java 8: attribute-tolerant copy
+             this.storagePath = tempFile;
+             this.isCopy = true;
+         }
+diff --git a/net/minecraft/util/profiling/jfr/JvmProfiler.java b/net/minecraft/util/profiling/jfr/JvmProfiler.java
+index 62a4497..53306e9 100644
+--- a/net/minecraft/util/profiling/jfr/JvmProfiler.java
++++ b/net/minecraft/util/profiling/jfr/JvmProfiler.java
+@@ -18,9 +18,20 @@ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+ public interface JvmProfiler {
+-    JvmProfiler INSTANCE = Runtime.class.getModule().getLayer().findModule("jdk.jfr").isPresent() && FlightRecorder.isAvailable()
+-        ? JfrProfiler.getInstance()
+-        : new JvmProfiler.NoOpProfiler();
++    JvmProfiler INSTANCE = createInstance(); // Paper - Java 8: JFR is optional
++
++    // Paper start - Java 8: JFR is optional; probe for it reflectively so JVMs without jdk.jfr never link FlightRecorder
++    private static JvmProfiler createInstance() {
++        try {
++            Class.forName("jdk.jfr.FlightRecorder", false, JvmProfiler.class.getClassLoader());
++            if (FlightRecorder.isAvailable()) {
++                return JfrProfiler.getInstance();
++            }
++        } catch (final Throwable ignored) {
++        }
++        return new JvmProfiler.NoOpProfiler();
++    }
++    // Paper end - Java 8
+ 
+     boolean start(Environment environment);
+ 
+diff --git a/net/minecraft/world/level/chunk/storage/RegionFile.java b/net/minecraft/world/level/chunk/storage/RegionFile.java
+index 3de7fd2..97c9d53 100644
+--- a/net/minecraft/world/level/chunk/storage/RegionFile.java
++++ b/net/minecraft/world/level/chunk/storage/RegionFile.java
+@@ -112,7 +112,7 @@ public class RegionFile implements AutoCloseable, ca.spottedleaf.moonrise.patche
+         try {
+             this.file.force(true);
+             LOGGER.warn("Backing up regionfile \"{}\" to {}", this.path.toAbsolutePath(), to.toAbsolutePath());
+-            Files.copy(this.path, to, java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
++            io.papermc.paper.util.FileCopies.copy(this.path, to, java.nio.file.StandardCopyOption.COPY_ATTRIBUTES); // Paper - Java 8: attribute-tolerant copy
+             LOGGER.warn("Backed up the regionfile to {}", to.toAbsolutePath());
+         } catch (IOException ex) {
+             LOGGER.error("Failed to backup to {}", to.toAbsolutePath(), ex);
+diff --git a/net/minecraft/world/level/storage/LevelStorageSource.java b/net/minecraft/world/level/storage/LevelStorageSource.java
+index 6f24eb3..47af9bb 100644
+--- a/net/minecraft/world/level/storage/LevelStorageSource.java
++++ b/net/minecraft/world/level/storage/LevelStorageSource.java
+@@ -484,7 +484,13 @@ public class LevelStorageSource {
+ 
+         public long estimateDiskSpace() {
+             try {
+-                return Files.getFileStore(this.levelDirectory.path).getUsableSpace();
++                // Paper start - Java 8: a store that cannot report its size (total space 0, e.g. virtual/sandboxed filesystems) is "unknown", not "full"
++                final java.nio.file.FileStore store = Files.getFileStore(this.levelDirectory.path);
++                if (store.getTotalSpace() <= 0L) {
++                    return Long.MAX_VALUE;
++                }
++                return store.getUsableSpace();
++                // Paper end - Java 8
+             } catch (Exception ignored) {
+                 return Long.MAX_VALUE;
+             }
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index eddb6eb..fabfb70 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -54,7 +54,7 @@ public class PlayerDataStorage {
+         Path backupPath = playerDirPath.resolve(idString + "_corrupted_" + ZonedDateTime.now().format(FileNameDateFormatter.FORMATTER) + suffix);
+         if (Files.isRegularFile(realPath)) {
+             try {
+-                Files.copy(realPath, backupPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
++                io.papermc.paper.util.FileCopies.copy(realPath, backupPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES); // Paper - Java 8: attribute-tolerant copy
+             } catch (Exception e) {
+                 LOGGER.warn("Failed to copy the player.dat file for {}", nameAndId.name(), e);
+             }

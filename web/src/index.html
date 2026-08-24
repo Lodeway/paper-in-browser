@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="A real Paper Minecraft server running inside this browser tab, executed by CheerpJ. A Lodeway Labs experiment."
+    />
+    <title>Paper in the browser · Lodeway Labs</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="../styles/globals.css" />
+    <!-- The header is sticky: anchored sections must stop short of it. -->
+    <style>
+      [id]:not(body) {
+        scroll-margin-top: 6rem;
+      }
+    </style>
+    <!-- Theme before first paint, so a dark-preference visitor never sees a white flash. -->
+    <script>
+      try {
+        var t = localStorage.getItem("paper-labs.theme");
+        if (t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches))
+          document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

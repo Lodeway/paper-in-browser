@@ -1,0 +1,327 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * The Lodeway design system.
+ *
+ * The direction is "Pixel Survey" (resolved 2026-08-20, replacing "Ops Channel"):
+ * paper-white ground ruled in ink, a cartographer's green as the one signal
+ * colour, Silkscreen as the display voice, IBM Plex Mono for everything else.
+ * Corners are square, borders are drawn in ink, and depth comes from hard
+ * offset shadows rather than blur. Light is the brand now; dark is the same
+ * page printed as a negative, with the terminal's surface for a ground.
+ *
+ * Colours are written as hex rather than shadcn's oklch on purpose: the palette
+ * was agreed as hex in the redesign document, and a reader should be able to
+ * match a token to that document without a colour-space conversion.
+ * Tailwind v4 handles opacity modifiers (`bg-signal/40`) on hex via color-mix,
+ * so nothing is lost.
+ *
+ *   ink #191613 · survey green #2e7d3a · sprout #7fc86b (green as text on ink)
+ *   body #57503f · dim #8a8271 · hairline #d8d2c2 · paper tint #f2f2f0
+ */
+
+/*
+ * The two voices, self-hosted. Latin subsets only, and that is deliberate: five
+ * files total about 40 KB, no request leaves for Google at runtime, and the og
+ * and listing-image generators can point Chrome at these same bytes so every
+ * rendering of the brand uses the same glyphs. Glyphs outside latin (the ■ ▚ □
+ * marks, arrows) intentionally fall through to the system monospace.
+ */
+@font-face {
+  font-family: "Silkscreen";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/silkscreen-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Silkscreen";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/silkscreen-latin-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/ibm-plex-mono-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/ibm-plex-mono-latin-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/ibm-plex-mono-latin-600.woff2") format("woff2");
+}
+
+@theme {
+  /*
+   * Mono carries everything now, body copy included; the redesign has no sans
+   * voice at all. `--font-display` is Silkscreen, the pixel face, for headings,
+   * eyebrows, buttons and the wordmark. `--font-sans` still exists because
+   * shadcn's components ask for it, and it resolves to the same Plex Mono so a
+   * component cannot drift out of the voice by using the "wrong" alias.
+   */
+  --font-sans:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --font-display: "Silkscreen", "IBM Plex Mono", ui-monospace, monospace;
+
+  /*
+   * The hard shadows. Depth in this design is a shape offset toward the
+   * bottom-right, never a blur; the colour is a theme token so paper casts ink
+   * and the dark theme casts black. Steps by prominence, not nesting:
+   *
+   *   hard-xs (1px)  a pressed control: the active state's residue.
+   *   hard-sm (4px)  a CONTROL that pops: the primary button, the demo chip.
+   *                  Controls cast SOLID ink (`--shadow-strong`); cards cast
+   *                  the screened ink (`--shadow-color`), so a page of panels
+   *                  stays quiet while its one button stays loud.
+   *   hard    (6px)  a CARD in a grid: a step, a plan.
+   *   hard-lg (8px)  the page's HEADLINE OBJECTS: the map frame, the terminal,
+   *                  the comparison table, the closing band.
+   *
+   * `shadow-hard-signal` is the one exception, reserved for the paid plan and
+   * the closing band, where the shadow itself is the accent.
+   */
+  --shadow-hard-xs: 1px 1px 0 var(--shadow-strong);
+  --shadow-hard-sm: 4px 4px 0 var(--shadow-strong);
+  --shadow-hard: 6px 6px 0 var(--shadow-color);
+  --shadow-hard-lg: 8px 8px 0 var(--shadow-color);
+  --shadow-hard-signal: 6px 6px 0 var(--signal);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /*
+   * Lodeway's own tokens, on top of shadcn's set.
+   *
+   * `signal` is the survey green as a *surface* (a fill with ink or paper on
+   * it); `signal-ink` is the green as *text on the ground* — the same green on
+   * paper, and the brighter sprout green on the dark ground, where #2e7d3a
+   * against near-black stops reading. Keeping them apart is what lets the dark
+   * theme be a design rather than an inversion. `ok` is the log's connected
+   * state. `rule` is the survey hairline — quieter than `border`, for grids
+   * that structure rather than enclose; `border` itself is INK now, because the
+   * pixel design draws its boxes rather than hinting at them.
+   */
+  --color-signal: var(--signal);
+  --color-signal-foreground: var(--signal-foreground);
+  --color-signal-ink: var(--signal-ink);
+  --color-ok: var(--ok);
+  --color-rule: var(--rule);
+
+  /*
+   * The radius scale: every step is zero.
+   *
+   * The pixel design has no curves anywhere — a corner is a corner, at every
+   * nesting depth, which is why this is four declarations and not a ladder. The
+   * steps keep their names so shadcn's components and every existing call site
+   * (`rounded-xl` on a panel, `rounded-md` on a control) still mean "this is a
+   * panel" and "this is a control" without meaning a curve. `rounded-full`
+   * remains genuinely round and is reserved for the spinner; a status dot in
+   * this design is a square.
+   */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+}
+
+/*
+ * Light — the brand. Paper white, ink lines, survey green.
+ */
+:root {
+  color-scheme: light;
+  --radius: 0px;
+
+  --background: #ffffff;
+  --foreground: #191613;
+  --card: #ffffff;
+  --card-foreground: #191613;
+  --popover: #ffffff;
+  --popover-foreground: #191613;
+  --primary: #2e7d3a;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f0;
+  --secondary-foreground: #191613;
+  --muted: #f2f2f0;
+  --muted-foreground: #57503f;
+  --accent: #f2f2f0;
+  --accent-foreground: #191613;
+  --destructive: #b52f10;
+  --border: #191613;
+  --input: #191613;
+  --ring: #2e7d3a;
+
+  --signal: #2e7d3a;
+  --signal-foreground: #ffffff;
+  --signal-ink: #2e7d3a;
+  --ok: #2e7d3a;
+  --rule: #d8d2c2;
+
+  /* Hard shadows are cast in ink: screened for cards, solid for controls. */
+  --shadow-color: rgba(25, 22, 19, 0.18);
+  --shadow-strong: #191613;
+
+  --chart-1: #2e7d3a;
+  --chart-2: #57503f;
+  --chart-3: #b52f10;
+  --chart-4: #e8842a;
+  --chart-5: #8a8271;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #191613;
+  --sidebar-primary: #2e7d3a;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f2f2f0;
+  --sidebar-accent-foreground: #191613;
+  --sidebar-border: #191613;
+  --sidebar-ring: #2e7d3a;
+
+  /*
+   * The illustration's materials (iso/blocks.ts). Only the *lit* colour is
+   * given: the south and east faces are this multiplied by the engine's own
+   * 0.8 and 0.6 in CSS, so a theme only ever has to choose five colours and the
+   * light model stays the renderer's.
+   *
+   * `signal` here is the survey green, which makes the wordmark's cube the
+   * green mark the whole identity now hangs off (favicon.svg restates these
+   * exact resolved fills as literals).
+   */
+  --iso-stone: #90a9b4;
+  --iso-soil: #bb9268;
+  --iso-moss: #93b08e;
+  --iso-sand: #dcc08d;
+  --iso-signal: #2e7d3a;
+}
+
+/*
+ * Dark — the negative. The terminal's ink surface for a ground, paper-ish
+ * text, the same green as a surface and the sprout green as text.
+ */
+.dark {
+  color-scheme: dark;
+
+  --background: #191613;
+  --foreground: #ece7da;
+  --card: #201c17;
+  --card-foreground: #ece7da;
+  --popover: #262119;
+  --popover-foreground: #ece7da;
+  --primary: #2e7d3a;
+  --primary-foreground: #ffffff;
+  --secondary: #2a251e;
+  --secondary-foreground: #ece7da;
+  --muted: #262119;
+  --muted-foreground: #b0a890;
+  --accent: #2e2921;
+  --accent-foreground: #f2f2f0;
+  --destructive: #e05c3a;
+  --border: #57503f;
+  --input: #6a6350;
+  --ring: #7fc86b;
+
+  --signal: #2e7d3a;
+  --signal-foreground: #ffffff;
+  --signal-ink: #7fc86b;
+  --ok: #7fc86b;
+  --rule: #3a352c;
+
+  /* On ink, the cast is plain black; screened harder or it swallows the gap. */
+  --shadow-color: rgba(0, 0, 0, 0.45);
+  --shadow-strong: #000000;
+
+  --chart-1: #7fc86b;
+  --chart-2: #b0a890;
+  --chart-3: #e05c3a;
+  --chart-4: #f6d64a;
+  --chart-5: #8a8271;
+
+  --sidebar: #201c17;
+  --sidebar-foreground: #ece7da;
+  --sidebar-primary: #2e7d3a;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2e2921;
+  --sidebar-accent-foreground: #f2f2f0;
+  --sidebar-border: #57503f;
+  --sidebar-ring: #7fc86b;
+
+  --iso-stone: #6d8a97;
+  --iso-soil: #97724d;
+  --iso-moss: #6f9575;
+  --iso-sand: #c2a370;
+  --iso-signal: #2e7d3a;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  /*
+   * Selection in the signal colour: on this much white paper it is the loudest
+   * green on the page, which is what a selection is for.
+   */
+  ::selection {
+    background: var(--signal);
+    color: var(--signal-foreground);
+  }
+  /*
+   * Focus is a product surface here, not a fallback: the whole onboarding is
+   * one input and one button, and a server owner pasting an address from a
+   * terminal is as likely to be on the keyboard as the mouse. A 2px green ring
+   * with an offset reads on both the paper and the ink.
+   */
+  :focus-visible {
+    @apply outline-signal outline-2 outline-offset-2;
+  }
+}

@@ -1,0 +1,249 @@
+diff --git a/paper-api/src/main/java/io/papermc/paper/event/executor/EventExecutorFactory.java b/paper-api/src/main/java/io/papermc/paper/event/executor/EventExecutorFactory.java
+index 2e3e21c3e..463387f4b 100644
+--- a/paper-api/src/main/java/io/papermc/paper/event/executor/EventExecutorFactory.java
++++ b/paper-api/src/main/java/io/papermc/paper/event/executor/EventExecutorFactory.java
+@@ -40,14 +40,48 @@ public final class EventExecutorFactory {
+      * @param eventClass the class of the event to handle
+      */
+     public static EventExecutor create(final Method method, final Class<? extends Event> eventClass) {
+-        final List<?> classData = List.of(method, eventClass);
++        // Paper start - Java 8: hidden classes are unavailable; use a plain MethodHandle-backed executor
+         try {
+-            final MethodHandles.Lookup newClass = MethodHandles.lookup().defineHiddenClassWithClassData(TEMPLATE_CLASS_BYTES, classData, true);
+-            return newClass.lookupClass().asSubclass(EventExecutor.class).getDeclaredConstructor().newInstance();
+-        } catch (ReflectiveOperationException e) {
++            MethodHandle mh = MethodHandles.lookup().unreflect(method);
++            if (Modifier.isStatic(method.getModifiers())) {
++                mh = MethodHandles.dropArguments(mh, 0, Listener.class);
++            }
++            mh = mh.asType(MethodType.methodType(void.class, Listener.class, Event.class));
++            return new MethodHandleEventExecutor(method, mh, eventClass);
++        } catch (IllegalAccessException e) {
+             throw new AssertionError(e);
+         }
++        // Paper end - Java 8
++    }
++
++    // Paper start - Java 8
++    private static final class MethodHandleEventExecutor implements EventExecutor {
++        private final Method method;
++        private final MethodHandle handle;
++        private final Class<? extends Event> eventClass;
++
++        MethodHandleEventExecutor(final Method method, final MethodHandle handle, final Class<? extends Event> eventClass) {
++            this.method = method;
++            this.handle = handle;
++            this.eventClass = eventClass;
++        }
++
++        @Override
++        public void execute(final Listener listener, final Event event) throws org.bukkit.event.EventException {
++            if (!this.eventClass.isInstance(event)) return;
++            try {
++                this.handle.invokeExact(listener, event);
++            } catch (Throwable t) {
++                com.destroystokyo.paper.util.SneakyThrow.sneaky(t);
++            }
++        }
++
++        @Override
++        public String toString() {
++            return "MethodHandleEventExecutor['" + this.method + "']";
++        }
+     }
++    // Paper end - Java 8
+ 
+     record ClassData(Method method, MethodHandle methodHandle, Class<? extends Event> eventClass) {
+ 
+diff --git a/paper-server/src/main/java/io/papermc/paper/configuration/ConfigurationLoaders.java b/paper-server/src/main/java/io/papermc/paper/configuration/ConfigurationLoaders.java
+index 227039a6c..451cc097d 100644
+--- a/paper-server/src/main/java/io/papermc/paper/configuration/ConfigurationLoaders.java
++++ b/paper-server/src/main/java/io/papermc/paper/configuration/ConfigurationLoaders.java
+@@ -22,6 +22,7 @@ public final class ConfigurationLoaders {
+         return naturallySorted()
+             .headerMode(HeaderMode.NONE)
+             .path(path)
++            .sink(AtomicConfigWriters.atomicWriterFactory(path, java.nio.charset.StandardCharsets.UTF_8)) // Paper - Java 8: attribute-tolerant atomic writes
+             .build();
+     }
+ }
+diff --git a/paper-server/src/main/java/io/papermc/paper/configuration/Configurations.java b/paper-server/src/main/java/io/papermc/paper/configuration/Configurations.java
+index b2c5e5cc2..79a2c46dc 100644
+--- a/paper-server/src/main/java/io/papermc/paper/configuration/Configurations.java
++++ b/paper-server/src/main/java/io/papermc/paper/configuration/Configurations.java
+@@ -122,6 +122,7 @@ public abstract class Configurations<G, W> {
+         final YamlConfigurationLoader loader = this.createGlobalLoaderBuilder(registryAccess)
+             .defaultOptions(this.applyObjectMapperFactory(this.createGlobalObjectMapperFactoryBuilder().build()))
+             .path(configFile)
++            .sink(AtomicConfigWriters.atomicWriterFactory(configFile, java.nio.charset.StandardCharsets.UTF_8)) // Paper - Java 8: attribute-tolerant atomic writes
+             .build();
+         final ConfigurationNode node;
+         if (Files.notExists(configFile)) {
+@@ -186,6 +187,7 @@ public abstract class Configurations<G, W> {
+             this.createWorldConfigLoaderBuilder(contextMap)
+                 .defaultOptions(this.applyObjectMapperFactory(this.createWorldObjectMapperFactoryBuilder(contextMap).build()))
+                 .path(configFile)
++                .sink(AtomicConfigWriters.atomicWriterFactory(configFile, java.nio.charset.StandardCharsets.UTF_8)) // Paper - Java 8: attribute-tolerant atomic writes
+                 .build(),
+             willCreate
+         );
+@@ -226,6 +228,7 @@ public abstract class Configurations<G, W> {
+         final YamlConfigurationLoader worldLoader = this.createWorldConfigLoaderBuilder(contextMap)
+             .defaultOptions(this.applyObjectMapperFactory(this.createWorldObjectMapperFactoryBuilder(contextMap).build()))
+             .path(worldConfigFile)
++            .sink(AtomicConfigWriters.atomicWriterFactory(worldConfigFile, java.nio.charset.StandardCharsets.UTF_8)) // Paper - Java 8: attribute-tolerant atomic writes
+             .build();
+         final ConfigurationNode worldNode = worldLoader.load();
+         if (newFile) { // set the version field if new file
+diff --git a/paper-server/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java b/paper-server/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
+index e6511bddc..336e8fa9a 100644
+--- a/paper-server/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
++++ b/paper-server/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
+@@ -86,7 +86,7 @@ public class HorriblePlayerLoginEventHack {
+         connection.handledLegacyLoginEvent = true;
+ 
+         CraftPlayer horribleBukkitPlayer = player.getBukkitEntity();
+-        PlayerLoginEvent event = new PlayerLoginEvent(horribleBukkitPlayer, connection.hostname, ((java.net.InetSocketAddress) connection.getRemoteAddress()).getAddress(), ((java.net.InetSocketAddress) connection.channel.remoteAddress()).getAddress());
++        PlayerLoginEvent event = new PlayerLoginEvent(horribleBukkitPlayer, connection.hostname, ((java.net.InetSocketAddress) connection.getRemoteAddress()).getAddress(), io.papermc.paper.network.LocalTransport.rawAddress(connection.channel)); // Paper - Java 8: local transport has no socket address
+         event.disallow(result.result(), PaperAdventure.asAdventure(result.message()));
+         event.callEvent();
+ 
+diff --git a/paper-server/src/main/java/io/papermc/paper/connection/PaperConfigurationTask.java b/paper-server/src/main/java/io/papermc/paper/connection/PaperConfigurationTask.java
+index e3fefbd97..087d18080 100644
+--- a/paper-server/src/main/java/io/papermc/paper/connection/PaperConfigurationTask.java
++++ b/paper-server/src/main/java/io/papermc/paper/connection/PaperConfigurationTask.java
+@@ -14,9 +14,14 @@ import org.slf4j.Logger;
+ public class PaperConfigurationTask implements ConfigurationTask {
+     private static final Logger LOGGER = LogUtils.getClassLogger();
+ 
+-    public static final ExecutorService CONFIGURATION_POOL = Executors.newThreadPerTaskExecutor(
+-        Thread.ofVirtual().name("Configuration Thread #", 0).uncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER)).factory()
+-    );
++    // Paper - Java 8: no virtual threads; use a cached platform thread pool with an equivalent factory
++    private static final java.util.concurrent.atomic.AtomicInteger CONFIGURATION_THREAD_ID = new java.util.concurrent.atomic.AtomicInteger();
++    public static final ExecutorService CONFIGURATION_POOL = Executors.newCachedThreadPool(runnable -> {
++        final Thread thread = new Thread(runnable, "Configuration Thread #" + CONFIGURATION_THREAD_ID.getAndIncrement());
++        thread.setDaemon(true);
++        thread.setUncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER));
++        return thread;
++    });
+ 
+     public static final ConfigurationTask.Type TYPE = new ConfigurationTask.Type("paper_event_handling");
+ 
+diff --git a/paper-server/src/main/java/io/papermc/paper/logging/SysoutCatcher.java b/paper-server/src/main/java/io/papermc/paper/logging/SysoutCatcher.java
+index a8e813ca8..c14b9c187 100644
+--- a/paper-server/src/main/java/io/papermc/paper/logging/SysoutCatcher.java
++++ b/paper-server/src/main/java/io/papermc/paper/logging/SysoutCatcher.java
+@@ -49,7 +49,15 @@ public final class SysoutCatcher {
+ 
+         @Override
+         public void println(@Nullable final String line) {
+-            final Class<?> clazz = STACK_WALKER.getCallerClass();
++            // Paper start - Java 8: StackWalker emulation may fail on some JVMs; fall back to plain output
++            final Class<?> clazz;
++            try {
++                clazz = STACK_WALKER.getCallerClass();
++            } catch (final Throwable t) {
++                super.println(line);
++                return;
++            }
++            // Paper end - Java 8
+             try {
+                 final JavaPlugin plugin = JavaPlugin.getProvidingPlugin(clazz);
+ 
+diff --git a/paper-server/src/main/java/io/papermc/paper/plugin/provider/source/FileProviderSource.java b/paper-server/src/main/java/io/papermc/paper/plugin/provider/source/FileProviderSource.java
+index 9661f033b..3e8fed619 100644
+--- a/paper-server/src/main/java/io/papermc/paper/plugin/provider/source/FileProviderSource.java
++++ b/paper-server/src/main/java/io/papermc/paper/plugin/provider/source/FileProviderSource.java
+@@ -61,7 +61,7 @@ public class FileProviderSource implements ProviderSource<Path, Path> {
+     public void registerProviders(EntrypointHandler entrypointHandler, Path context) throws Exception {
+         String source = this.contextChecker.apply(context);
+ 
+-        JarFile file = new JarFile(context.toFile(), true, JarFile.OPEN_READ, JarFile.runtimeVersion());
++        JarFile file = new JarFile(context.toFile(), true, JarFile.OPEN_READ); // Paper - Java 8: no multi-release JarFile constructor
+         PluginFileType<?, ?> type = PluginFileType.guessType(file);
+         if (type == null) {
+             // Throw IAE wrapped in RE to prevent callers from considering this a "invalid parameter" as caller ignores IAE.
+diff --git a/paper-server/src/main/java/io/papermc/paper/util/ServerEnvironment.java b/paper-server/src/main/java/io/papermc/paper/util/ServerEnvironment.java
+index 422f2d0aa..7381d5c81 100644
+--- a/paper-server/src/main/java/io/papermc/paper/util/ServerEnvironment.java
++++ b/paper-server/src/main/java/io/papermc/paper/util/ServerEnvironment.java
+@@ -1,7 +1,6 @@
+ package io.papermc.paper.util;
+ 
+ import com.sun.security.auth.module.NTSystem;
+-import com.sun.security.auth.module.UnixSystem;
+ import java.util.Set;
+ import org.apache.commons.lang3.SystemUtils;
+ 
+@@ -10,13 +9,39 @@ public class ServerEnvironment {
+     private static final String WINDOWS_HIGH_INTEGRITY_LEVEL = "S-1-16-12288";
+ 
+     static {
++        boolean rootOrAdmin;
+         if (SystemUtils.IS_OS_WINDOWS) {
+-            RUNNING_AS_ROOT_OR_ADMIN = Set.of(new NTSystem().getGroupIDs()).contains(WINDOWS_HIGH_INTEGRITY_LEVEL);
++            rootOrAdmin = Set.of(new NTSystem().getGroupIDs()).contains(WINDOWS_HIGH_INTEGRITY_LEVEL);
+         } else {
+-            RUNNING_AS_ROOT_OR_ADMIN = new UnixSystem().getUid() == 0;
++            // Paper start - Java 8: determine the effective user without JAAS' native library (unavailable on some JVMs)
++            rootOrAdmin = unixEffectiveUidIsRoot();
++            // Paper end - Java 8
+         }
++        RUNNING_AS_ROOT_OR_ADMIN = rootOrAdmin;
+     }
+ 
++    // Paper start - Java 8
++    /**
++     * {@code user.name} is derived from the effective uid's passwd entry, so it is "root" for uid 0 (including under sudo).
++     * On Linux, {@code /proc/self/status} gives the numeric uids directly and is used when available.
++     */
++    private static boolean unixEffectiveUidIsRoot() {
++        final java.nio.file.Path status = java.nio.file.Paths.get("/proc/self/status");
++        if (java.nio.file.Files.isReadable(status)) {
++            try {
++                for (final String line : java.nio.file.Files.readAllLines(status)) {
++                    if (line.startsWith("Uid:")) {
++                        final String[] ids = line.substring(4).trim().split("\\s+");
++                        return ids.length > 1 && "0".equals(ids[1]);
++                    }
++                }
++            } catch (final java.io.IOException ignored) {
++            }
++        }
++        return "root".equals(System.getProperty("user.name"));
++    }
++    // Paper end - Java 8
++
+     public static boolean userIsRootOrAdmin() {
+         return RUNNING_AS_ROOT_OR_ADMIN;
+     }
+diff --git a/paper-server/src/main/java/io/papermc/paper/world/migration/WorldMigrationSupport.java b/paper-server/src/main/java/io/papermc/paper/world/migration/WorldMigrationSupport.java
+index f961539a3..a0ce067e6 100644
+--- a/paper-server/src/main/java/io/papermc/paper/world/migration/WorldMigrationSupport.java
++++ b/paper-server/src/main/java/io/papermc/paper/world/migration/WorldMigrationSupport.java
+@@ -187,7 +187,7 @@ final class WorldMigrationSupport {
+         }
+ 
+         Files.createDirectories(target.getParent());
+-        Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
++        io.papermc.paper.util.FileCopies.copy(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES); // Paper - Java 8: attribute-tolerant copy
+         return true;
+     }
+ 
+diff --git a/paper-server/src/main/java/org/spigotmc/WatchdogThread.java b/paper-server/src/main/java/org/spigotmc/WatchdogThread.java
+index ab6c553f0..1865ac5b2 100644
+--- a/paper-server/src/main/java/org/spigotmc/WatchdogThread.java
++++ b/paper-server/src/main/java/org/spigotmc/WatchdogThread.java
+@@ -157,6 +157,11 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+     }
+ 
+     private static void dumpThread(ThreadInfo thread, Logger logger) {
++        // ThreadMXBean.getThreadInfo/dumpAllThreads may return null for a thread that is not live (per its contract),
++        // e.g. the main thread mid-shutdown; skip rather than NPE while producing a diagnostic dump.
++        if (thread == null) {
++            return;
++        }
+         logger.log(Level.SEVERE, "------------------------------");
+ 
+         logger.log(Level.SEVERE, "Current Thread: " + thread.getThreadName());

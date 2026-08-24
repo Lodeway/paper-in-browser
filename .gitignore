@@ -1,0 +1,21 @@
+# build outputs and caches
+work/
+web/dist/
+web/node_modules/
+web/public/jars/
+web/public/classpath.txt
+server/paper-labs-server
+server/server
+
+# local-only snapshot of the original ad-hoc toolchain (kept for reference, reproducible via scripts/build-jar.sh)
+.toolchain-snapshot/
+
+# local agent config and skills stay out of the repo
+.claude/
+.agents/
+skills-lock.json
+
+# JVMDowngrader drops its api cache wherever it runs
+.jvmdg/
+
+.DS_Store
