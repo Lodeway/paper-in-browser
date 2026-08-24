@@ -244,7 +244,11 @@ export async function startServer(opts: StartOptions): Promise<void> {
   setStatus("booting", "loading the CheerpJ runtime");
 
   await loadScript("https://cjrtnc.leaningtech.com/4.3/loader.js");
-  const classpath = (await (await fetch("/classpath.txt")).text())
+  // A missing classpath.txt would otherwise turn the server's 404 body into jar paths, and the
+  // only symptom would be "Could not find or load main class BrowserMain" much later.
+  const classpathRes = await fetch("/classpath.txt");
+  if (!classpathRes.ok) throw new Error(`classpath.txt is not being served (HTTP ${classpathRes.status})`);
+  const classpath = (await classpathRes.text())
     .trim()
     .split("\n")
     .map((p) => "/app/" + p)

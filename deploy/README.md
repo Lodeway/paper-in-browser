@@ -5,6 +5,22 @@ Two roles, one binary. They can share a process or run on separate machines with
 - **Site**: serves `web/dist` (with the jars), the Mojang proxies, and `/api/identity`.
 - **Tunnel**: `/tunnel` WebSocket, the Minecraft TCP listener, and `/ask` for Caddy's on-demand TLS.
 
+## What to copy
+
+`web/dist` is not self-contained: `build.ts` leaves `jars`, `classpath.txt` and `world.zip` as
+symlinks into `web/public`, so the ~110 MB of jars never get duplicated. Copy the payload with the
+links resolved, or the page boots to `Could not find or load main class BrowserMain` — CheerpJ
+happily turns a 404 body into a classpath.
+
+```sh
+make jar world web
+rsync -aL --delete web/dist/ <host>:/opt/paper-labs/dist/
+```
+
+`-L` is the whole point: without it the symlinks land dangling and only `index.html` works.
+Sanity-check a deploy with `curl -I https://paper.labs.lodeway.app/classpath.txt` — it must be a
+200, not the Go server's `404 page not found`.
+
 ## DNS
 
 - `paper.labs.lodeway.app` → the site host.
