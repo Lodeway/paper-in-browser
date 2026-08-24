@@ -78,3 +78,7 @@ Two parts carry other people's code, and we claim no ownership of either:
 The built jars are Paper and Mojang code and stay under their terms. Running a server means agreeing to the [Minecraft EULA](https://aka.ms/MinecraftEULA); the page asks each visitor before first boot.
 
 Not affiliated with Mojang, Microsoft, or the PaperMC project.
+
+## Use of AI
+
+This project used AI in its creation, so it is not necessarily a good example of good coding practices. AI commits and PRs are welcome, but they must be human reviewed.
