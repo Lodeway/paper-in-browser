@@ -1,0 +1,8 @@
+The files in this directory are modified copies of JVMDowngrader source
+(https://github.com/unimined/JvmDowngrader), Copyright (C) 2024 William Gray,
+used under the GNU Lesser General Public License v2.1
+(https://github.com/unimined/JvmDowngrader/blob/main/license/LGPLv2.1.md).
+We claim no copyright over the original code; modifications are offered
+under the same license.
+
+The MIT license at the repository root does not apply to this directory.

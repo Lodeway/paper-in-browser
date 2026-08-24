@@ -64,6 +64,13 @@ If you change a patch, `make verify` before opening a PR. It catches most Java 8
 
 ## License
 
-Code in this repo is MIT. The patches apply to [Paper](https://github.com/PaperMC/Paper) (GPL-3.0) and produce artifacts covered by Paper's and Mojang's terms. Running a server means agreeing to the [Minecraft EULA](https://aka.ms/MinecraftEULA); the page asks each visitor before first boot.
+The MIT license in [LICENSE](LICENSE) covers only the code original to this repo: `launcher/`, `scripts/`, `server/`, `sources/`, `web/`, and the fixup and analyzer tooling in `tools/`.
+
+Two parts carry other people's code, and we claim no ownership of either:
+
+- [patches/](patches/) holds diffs against [Paper](https://github.com/PaperMC/Paper). Their context and changed lines contain Paper, Moonrise, and Mojang-derived code, so the diffs follow Paper's GPL-3.0, and the Mojang-derived portions remain subject to Mojang's terms. See [patches/LICENSE](patches/LICENSE).
+- [tools/jvmdg/](tools/jvmdg/) and [tools/jvmdg-stubs/](tools/jvmdg-stubs/) hold modified copies of [JVMDowngrader](https://github.com/unimined/JvmDowngrader) source, which stay under its LGPL-2.1 license. Each directory has its own LICENSE notice.
+
+The built jars are Paper and Mojang code and stay under their terms. Running a server means agreeing to the [Minecraft EULA](https://aka.ms/MinecraftEULA); the page asks each visitor before first boot.
 
 Not affiliated with Mojang, Microsoft, or the PaperMC project.

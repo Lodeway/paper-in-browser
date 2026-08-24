@@ -1,0 +1,10 @@
+The diffs in this directory modify Paper (https://github.com/PaperMC/Paper)
+and contain Paper, Moonrise, and Mojang-derived code in their context and
+changed lines. We claim no copyright over any of that code.
+
+To the extent the diffs themselves are copyrightable, they are offered under
+the same terms as the code they modify: GPL-3.0, per Paper's LICENSE.md
+(https://github.com/PaperMC/Paper/blob/main/LICENSE.md). Mojang-derived
+portions remain subject to Mojang's terms and the Minecraft EULA.
+
+The MIT license at the repository root does not apply to this directory.
