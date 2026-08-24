@@ -241,7 +241,8 @@ export function App() {
                 </p>
               </div>
             </div>
-            <FilesPanel active={status === "running"} />
+            {/* The ops thread outlives the server thread, so files stay browsable after "stop". */}
+            <FilesPanel active={started && status !== "failed"} />
           </div>
         </Container>
 

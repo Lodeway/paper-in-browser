@@ -51,10 +51,17 @@ export function FilesPanel({ active }: { active: boolean }) {
     [active, segments],
   );
 
+  // No refresh button: the listing follows the server on its own, at a pace slow enough to
+  // stay out of the single cooperative thread's way while the server ticks.
   useEffect(() => {
-    if (active) void refresh([]);
+    if (!active) return;
+    void refresh();
+    const timer = setInterval(() => {
+      if (!editing) void refresh();
+    }, 4000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
+  }, [active, segments, editing]);
 
   async function download(entry: FileEntry) {
     try {
@@ -134,16 +141,6 @@ export function FilesPanel({ active }: { active: boolean }) {
           /{joinPath(segments)}
         </span>
         <span className="ml-auto flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Refresh the file listing"
-            title="Refresh"
-            disabled={!active}
-            onClick={() => void refresh()}
-          >
-            <span aria-hidden="true">⟳</span>
-          </Button>
           <Button variant="secondary" size="sm" disabled={!active} onClick={newFolder}>
             New folder
           </Button>

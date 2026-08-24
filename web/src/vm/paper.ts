@@ -81,8 +81,10 @@ const ops = {
   pending: new Map<number, OpWaiter>(),
 
   request(op: Op, path: string, payload?: Uint8Array): Promise<Uint8Array> {
-    if (status !== "running" && op !== Op.Command && op !== Op.Stop && status !== "starting") {
-      return Promise.reject(new Error("the server is not running"));
+    // File ops work whenever the JVM is up: the ops thread outlives the server thread, so the
+    // file manager keeps working after "stop". Before the first start there is nothing to ask.
+    if (status === "idle" || status === "failed") {
+      return Promise.reject(new Error("the server has not started"));
     }
     const id = this.nextId++;
     const pathBytes = new TextEncoder().encode(path);
